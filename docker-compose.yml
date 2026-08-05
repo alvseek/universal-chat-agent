@@ -1,0 +1,15 @@
+services:
+  universal-chat-agent:
+    build: .
+    env_file: .env
+    environment:
+      # Keep the SQLite memory in the named volume so it survives up/down.
+      - DB_PATH=/app/data/agent.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - agent-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  agent-data:

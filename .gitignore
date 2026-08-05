@@ -1,0 +1,20 @@
+# secrets — NEVER commit
+.env
+
+# data (may contain user messages)
+*.db
+*.sqlite
+*.sqlite3
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# internal build plans (wizard artifacts) — keep the open repo product-only
+plans/

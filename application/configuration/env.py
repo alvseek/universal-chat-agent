@@ -3,6 +3,15 @@
 Single source of settings. Fails fast (with a clear message) when a required
 variable is missing, so misconfiguration is obvious at startup rather than at
 the first request.
+
+Two groups of settings:
+
+* the brain itself — model, memory window, the default ``SYSTEM_PROMPT`` used
+  when a request names no agent;
+* the memory service — present only when ``MUNNIN_URL`` is set. With it, requests
+  may name an ``agent_id`` and the brain awakens that agent from Munnin using a
+  machine credential from Authentra. Without it, the brain is the single default
+  agent it always was.
 """
 from __future__ import annotations
 
@@ -15,6 +24,23 @@ load_dotenv()
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful, friendly assistant. Be concise and clear."
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_AGENT_CACHE_TTL_SECONDS = 8 * 60 * 60
+
+
+@dataclass(frozen=True)
+class MemoryServiceConfig:
+    """How to reach Munnin and the credential that identifies this brain to it."""
+
+    url: str  # e.g. https://munnin.lok.quest
+    resource: str  # the API resource indicator tokens are bound to
+    client_id: str
+    client_secret: str
+    scope: str
+    issuer: str  # e.g. https://auth.lok.quest/oidc
+    cache_ttl_seconds: int
+    # Which awakening layers to render, in order; None = every layer, canonical order.
+    layers: tuple[str, ...] | None
+    exclude: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -27,6 +53,7 @@ class Config:
     system_prompt: str
     host: str
     port: int
+    memory_service: MemoryServiceConfig | None
 
 
 def _require(name: str) -> str:
@@ -47,6 +74,29 @@ def _int(name: str, default: int, minimum: int = 1) -> int:
     return value if value >= minimum else default
 
 
+def _csv(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _memory_service() -> MemoryServiceConfig | None:
+    url = os.getenv("MUNNIN_URL", "").strip().rstrip("/")
+    if not url:
+        return None
+    layers = _csv("AWAKENING_LAYERS")
+    return MemoryServiceConfig(
+        url=url,
+        resource=os.getenv("MUNNIN_RESOURCE", "").strip() or f"{url}/mcp",
+        client_id=_require("MUNNIN_M2M_CLIENT_ID"),
+        client_secret=_require("MUNNIN_M2M_CLIENT_SECRET"),
+        scope=os.getenv("MUNNIN_M2M_SCOPE", "").strip(),
+        issuer=_require("AUTHENTRA_ISSUER").rstrip("/"),
+        cache_ttl_seconds=_int("AGENT_CACHE_TTL_SECONDS", DEFAULT_AGENT_CACHE_TTL_SECONDS),
+        layers=layers or None,
+        exclude=_csv("AWAKENING_EXCLUDE"),
+    )
+
+
 def load_config() -> Config:
     """Load settings from the environment (.env already applied)."""
     return Config(
@@ -59,4 +109,5 @@ def load_config() -> Config:
         system_prompt=os.getenv("SYSTEM_PROMPT", "").strip() or DEFAULT_SYSTEM_PROMPT,
         host=os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0",
         port=_int("PORT", 8000, minimum=1),
+        memory_service=_memory_service(),
     )

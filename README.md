@@ -103,8 +103,20 @@ restarts (SQLite file).
 | `OPENROUTER_BASE_URL` | OpenAI-compatible endpoint | `https://openrouter.ai/api/v1` |
 | `MEMORY_WINDOW` | Recent turns remembered per conversation | `15` |
 | `DB_PATH` | SQLite memory file | `agent.db` |
-| `SYSTEM_PROMPT` | The agent's persona | `You are a helpful...` |
+| `SYSTEM_PROMPT` | The default agent's persona (used when a request names no `agent_id`) | `You are a helpful...` |
 | `HOST` / `PORT` | Where the server listens | `0.0.0.0` / `8000` |
+
+**Memory service (optional)** — set `MUNNIN_URL` and the brain can *become* any agent that service holds (see [Agents from a memory service](#agents-from-a-memory-service)):
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `MUNNIN_URL` | The memory service; empty = single default agent | `https://munnin.example` |
+| `MUNNIN_RESOURCE` | API resource the token is bound to (default `<MUNNIN_URL>/mcp`) | `https://munnin.example/mcp` |
+| `MUNNIN_M2M_CLIENT_ID` / `MUNNIN_M2M_CLIENT_SECRET` | This brain's machine credential at the identity provider | — |
+| `MUNNIN_M2M_SCOPE` | Scope requested with the token (optional) | `memory:read` |
+| `AUTHENTRA_ISSUER` | OIDC issuer; token endpoint is `<issuer>/token` | `https://auth.example/oidc` |
+| `AGENT_CACHE_TTL_SECONDS` | How long a built agent stays warm | `28800` |
+| `AWAKENING_LAYERS` / `AWAKENING_EXCLUDE` | Which awakening layers become the prompt (empty = all, canonical order) | `identity,shared.reasoning` |
 
 ---
 
@@ -122,7 +134,8 @@ restarts (SQLite file).
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Liveness check → `{"status":"ok"}` |
-| POST | `/chat` | `{conversation_id, message}` → `{reply}` |
+| POST | `/chat` | `{conversation_id, message, agent_id?}` → `{reply}` — `agent_id` absent: the default agent answers; present: that agent is awakened from the memory service and answers as itself (404 if it does not exist, 400 if no memory service is configured, 503 if it cannot be reached) |
+| POST | `/agents/{agent_id}/reload` | Rebuild one agent from the memory service now, ahead of its cache TTL → `{agent_id, reloaded: true}` |
 
 ```sh
 curl -s http://localhost:8000/chat -H 'content-type: application/json' \
@@ -132,7 +145,14 @@ curl -s http://localhost:8000/chat -H 'content-type: application/json' \
 curl -s http://localhost:8000/chat -H 'content-type: application/json' \
   -d '{"conversation_id":"cli:me","message":"What is my name?"}'
 # {"reply":"Your name is Alvi!"}   ← memory, keyed by conversation_id
+
+# with a memory service configured: answer as a named agent
+curl -s http://localhost:8000/chat -H 'content-type: application/json' \
+  -d '{"conversation_id":"cli:me","message":"who are you?","agent_id":"invintiry-operator"}'
+# {"reply":"I'm your Inventory Operator ..."}   ← memory keyed invintiry-operator:cli:me
 ```
+
+Errors are always `{"error": "<message>"}` with the status code carrying the kind: 400 the caller can fix, 404 unknown agent, 503 memory service or identity provider unavailable, 500 a bug here.
 
 ---
 
@@ -148,9 +168,31 @@ curl -s http://localhost:8000/chat -H 'content-type: application/json' \
 3. **Generate** (`application/api_integrations/openrouter/llm_client.py`)
    - pydantic-ai runs the model over the message + history, returns the reply text.
 
+### Agents from a memory service
+
+With `MUNNIN_URL` set the brain is a runtime for agents that live as **data** in a memory
+service, not as code here. A request naming `agent_id` goes through:
+
+1. **Registry** (`business_services/agent_registry.py`) — is that agent warm? If so, use it.
+   Otherwise load it (one load per agent even under concurrent requests), keep it for
+   `AGENT_CACHE_TTL_SECONDS`, then refresh. A refresh that fails keeps serving the cached
+   copy with a warning; an agent the service no longer holds is dropped and answered 404.
+2. **Awaken** (`api_integrations/munnin/munnin_client.py`) — `GET /api/awaken?agent_id=…`
+   with a bearer from `api_integrations/authentra/token_provider.py` (OAuth
+   `client_credentials`, cached until shortly before expiry).
+3. **Render** (`business_domain/awakening_domain.py`) — the payload's layers become the
+   system prompt **by shape, never by name**: every layer the service sends is rendered
+   (whole records as sections, index entries as one-liners), in a canonical order with
+   unknown layers appended, so a new layer needs no code here. Narrowing is configuration
+   (`AWAKENING_LAYERS` / `AWAKENING_EXCLUDE`), never a hidden default.
+4. **Build** — a pydantic-ai `Agent` with that prompt, then the normal chat flow, with
+   history keyed `agent_id:conversation_id` so two agents sharing one brain never share
+   a conversation.
+
 ### Data Model
 
-One table, keyed by an opaque `conversation_id` so any bridge namespaces cleanly:
+One table, keyed by an opaque `conversation_id` so any bridge namespaces cleanly — and
+by `agent_id:conversation_id` when a request names an agent:
 
 ```
 messages(id, conversation_id, role, content, ts)
@@ -162,6 +204,8 @@ messages(id, conversation_id, role, content, ts)
 | Service | Purpose | Protocol | Timeout |
 |---------|---------|----------|---------|
 | OpenRouter | The LLM (OpenAI-compatible) | HTTPS | provider default |
+| Memory service (optional, `MUNNIN_URL`) | An agent's awakening, by `agent_id` | HTTPS, bearer | 30 s |
+| Identity provider (optional, `AUTHENTRA_ISSUER`) | The machine credential for the memory service | HTTPS, `client_credentials` | 30 s |
 
 ---
 

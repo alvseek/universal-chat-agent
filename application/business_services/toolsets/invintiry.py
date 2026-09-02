@@ -68,7 +68,7 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
     async def _resolve_item(ref: str) -> tuple[int | None, dict[str, Any] | None]:
         """(item_id, error_dict) — numeric refs skip the search round-trip."""
         ref = str(ref).strip()
-        if ref.isdigit():
+        if ref.lstrip("-").isdigit():  # same numeric rule as inventory_resolution
             return int(ref), None
         items = await client.search_items(ref)
         r = resolution.resolve_item(items, ref)
@@ -80,7 +80,7 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
 
     async def _resolve_location(ref: str) -> tuple[int | None, dict[str, Any] | None]:
         ref = str(ref).strip()
-        if ref.isdigit():
+        if ref.lstrip("-").isdigit():  # same numeric rule as inventory_resolution
             return int(ref), None
         locations = await client.search_locations(ref)
         r = resolution.resolve_location(locations, ref)

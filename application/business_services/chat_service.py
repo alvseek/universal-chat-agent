@@ -15,12 +15,17 @@ existing history is untouched.
 """
 from __future__ import annotations
 
+import string
+
 from pydantic_ai import Agent
 
 from application.api_integrations.openrouter import llm_client
 from application.business_domain import conversation_domain as domain
 from application.business_services.agent_registry import AgentRegistry
 from application.data_repositories.message_repository import MessageRepository
+from application.data_repositories.pending_approval_repository import (
+    PendingApprovalRepository,
+)
 
 
 class RegistryUnavailable(ValueError):
@@ -32,6 +37,21 @@ def memory_key(conversation_id: str, agent_id: str | None) -> str:
     return f"{agent_id}:{conversation_id}" if agent_id else conversation_id
 
 
+# A *clear* yes, per the operator's rule: anything else is a change request.
+_YES = frozenset({"yes", "y", "ya", "iya", "yup", "confirm", "yes please"})
+
+
+def is_clear_yes(text: str) -> bool:
+    return text.strip().strip(string.punctuation + " ").lower() in _YES
+
+
+def confirmation_reply(summary: str) -> str:
+    return (
+        f"Before I do it, confirm:\n{summary}\n"
+        'Reply "yes" to proceed — anything else cancels.'
+    )
+
+
 class ChatService:
     def __init__(
         self,
@@ -39,11 +59,13 @@ class ChatService:
         repository: MessageRepository,
         memory_window: int,
         registry: AgentRegistry | None = None,
+        pending: PendingApprovalRepository | None = None,
     ) -> None:
         self._agent = agent
         self._repo = repository
         self._window = memory_window
         self._registry = registry
+        self._pending = pending
 
     async def _resolve_agent(self, agent_id: str | None) -> Agent:
         if agent_id is None:
@@ -62,12 +84,33 @@ class ChatService:
         agent = await self._resolve_agent(agent_id)
         key = memory_key(cid, agent_id)
 
-        stored = self._repo.recent(key, self._window)
-        history = domain.select_window(
-            [(m.role, m.content) for m in stored], self._window
-        )
+        pending = self._pending.get(key) if self._pending else None
+        if pending is not None:
+            # Delete before resuming: a crash mid-resume loses the pending write
+            # rather than replaying it (lost beats doubled, as in the bridge).
+            self._pending.delete(key)
+            approve = is_clear_yes(message)
+            outcome = await llm_client.resume(
+                agent,
+                pending.messages,
+                pending.approval_ids,
+                approve=approve,
+                followup=None if approve else message,
+            )
+        else:
+            stored = self._repo.recent(key, self._window)
+            history = domain.select_window(
+                [(m.role, m.content) for m in stored], self._window
+            )
+            outcome = await llm_client.generate(agent, history, message)
 
-        reply = await llm_client.generate(agent, history, message)
+        if isinstance(outcome, llm_client.PendingRun):
+            if self._pending is None:  # tool-bound agent without a store is a wiring bug
+                raise RuntimeError("write tool paused a run but no pending store is configured")
+            self._pending.put(key, outcome.messages, outcome.approval_ids, outcome.summary)
+            reply = confirmation_reply(outcome.summary)
+        else:
+            reply = outcome
 
         # Persist only after a successful reply, so a failure never stores half a turn.
         self._repo.append(key, "user", message)

@@ -33,7 +33,10 @@ from application.business_domain.awakening_domain import AgentNotFound
 log = logging.getLogger("universal-chat-agent")
 
 PromptLoader = Callable[[str], Awaitable[str]]
-AgentBuilder = Callable[[str], Agent]
+# (agent_id, prompt) -> Agent: the id is what lets the builder attach the
+# toolsets configured for that agent (AGENT_TOOLSETS); the registry itself
+# neither knows nor cares what a toolset is.
+AgentBuilder = Callable[[str, str], Agent]
 
 
 @dataclass
@@ -113,7 +116,7 @@ class AgentRegistry:
 
     async def _load(self, agent_id: str) -> Agent:
         prompt = await self._load_prompt(agent_id)
-        agent = self._build(prompt)
+        agent = self._build(agent_id, prompt)
         self._entries[agent_id] = _Entry(agent=agent, loaded_at=self._clock())
         log.info("agent %r: loaded (%d chars of system prompt)", agent_id, len(prompt))
         return agent

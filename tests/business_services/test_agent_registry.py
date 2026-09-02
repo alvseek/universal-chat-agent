@@ -29,7 +29,7 @@ class _Loader:
 
 def _registry(loader, clock, ttl=100.0, retry=30.0):
     return AgentRegistry(
-        loader, build_agent=lambda prompt: {"prompt": prompt},
+        loader, build_agent=lambda agent_id, prompt: {"prompt": prompt},
         ttl_seconds=ttl, error_retry_seconds=retry, clock=lambda: clock["t"],
     )
 

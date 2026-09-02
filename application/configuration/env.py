@@ -44,6 +44,14 @@ class MemoryServiceConfig:
 
 
 @dataclass(frozen=True)
+class InvintiryConfig:
+    """How to reach the Invintiry inventory API, as the workspace's agent principal."""
+
+    api_url: str  # e.g. https://api.invintiry.example
+    token: str    # RS256 agent token minted by the workspace OWNER
+
+
+@dataclass(frozen=True)
 class Config:
     openrouter_api_key: str
     openrouter_model: str
@@ -54,6 +62,10 @@ class Config:
     host: str
     port: int
     memory_service: MemoryServiceConfig | None
+    # Which named toolsets each agent is bound to (AGENT_TOOLSETS). Code owns
+    # what a toolset does; this mapping owns who gets it. Empty = no agent has tools.
+    agent_toolsets: tuple[tuple[str, str], ...]
+    invintiry: InvintiryConfig | None
 
 
 def _require(name: str) -> str:
@@ -97,6 +109,26 @@ def _memory_service() -> MemoryServiceConfig | None:
     )
 
 
+def _agent_toolsets() -> tuple[tuple[str, str], ...]:
+    """Parse ``AGENT_TOOLSETS=agent=toolset,agent2=toolset2`` (repeats allowed)."""
+    pairs: list[tuple[str, str]] = []
+    for part in _csv("AGENT_TOOLSETS"):
+        agent, sep, toolset = part.partition("=")
+        if not sep or not agent.strip() or not toolset.strip():
+            raise ValueError(
+                f"AGENT_TOOLSETS: {part!r} is not an agent=toolset pair"
+            )
+        pairs.append((agent.strip(), toolset.strip()))
+    return tuple(pairs)
+
+
+def _invintiry() -> InvintiryConfig | None:
+    url = os.getenv("INVINTIRY_API_URL", "").strip().rstrip("/")
+    if not url:
+        return None
+    return InvintiryConfig(api_url=url, token=_require("INVINTIRY_AGENT_TOKEN"))
+
+
 def load_config() -> Config:
     """Load settings from the environment (.env already applied)."""
     return Config(
@@ -110,4 +142,6 @@ def load_config() -> Config:
         host=os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0",
         port=_int("PORT", 8000, minimum=1),
         memory_service=_memory_service(),
+        agent_toolsets=_agent_toolsets(),
+        invintiry=_invintiry(),
     )

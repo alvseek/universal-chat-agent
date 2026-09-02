@@ -14,7 +14,8 @@ BASE = {"OPENROUTER_API_KEY": "k", "OPENROUTER_MODEL": "m"}
 def _set(monkeypatch, values):
     for name in ("MUNNIN_URL", "MUNNIN_RESOURCE", "MUNNIN_M2M_CLIENT_ID", "MUNNIN_M2M_CLIENT_SECRET",
                  "MUNNIN_M2M_SCOPE", "AUTHENTRA_ISSUER", "AGENT_CACHE_TTL_SECONDS",
-                 "AWAKENING_LAYERS", "AWAKENING_EXCLUDE", *BASE):
+                 "AWAKENING_LAYERS", "AWAKENING_EXCLUDE",
+                 "AGENT_TOOLSETS", "INVINTIRY_API_URL", "INVINTIRY_AGENT_TOKEN", *BASE):
         monkeypatch.delenv(name, raising=False)
     for k, v in {**BASE, **values}.items():
         monkeypatch.setenv(k, v)
@@ -64,3 +65,34 @@ def test_memory_service_layers_parse_from_csv(monkeypatch):
     assert ms.cache_ttl_seconds == 60
     assert ms.layers == ("identity", "shared.reasoning")
     assert ms.exclude == ("emotional",)
+
+
+def test_no_toolsets_by_default(monkeypatch):
+    _set(monkeypatch, {})
+    config = env.load_config()
+    assert config.agent_toolsets == ()
+    assert config.invintiry is None
+
+
+def test_agent_toolsets_parse_pairs(monkeypatch):
+    _set(monkeypatch, {"AGENT_TOOLSETS": " invintiry-operator=invintiry , other=x "})
+    assert env.load_config().agent_toolsets == (
+        ("invintiry-operator", "invintiry"), ("other", "x"),
+    )
+
+
+def test_agent_toolsets_malformed_pair_fails_at_startup(monkeypatch):
+    _set(monkeypatch, {"AGENT_TOOLSETS": "invintiry-operator"})
+    with pytest.raises(ValueError, match="AGENT_TOOLSETS"):
+        env.load_config()
+
+
+def test_invintiry_url_requires_token(monkeypatch):
+    _set(monkeypatch, {"INVINTIRY_API_URL": "https://api.inv.example/"})
+    with pytest.raises(ValueError, match="INVINTIRY_AGENT_TOKEN"):
+        env.load_config()
+
+
+def test_invintiry_config_strips_trailing_slash(monkeypatch):
+    _set(monkeypatch, {"INVINTIRY_API_URL": "https://api.inv.example/", "INVINTIRY_AGENT_TOKEN": "t"})
+    assert env.load_config().invintiry.api_url == "https://api.inv.example"

@@ -118,6 +118,15 @@ restarts (SQLite file).
 | `AGENT_CACHE_TTL_SECONDS` | How long a built agent stays warm | `28800` |
 | `AWAKENING_LAYERS` / `AWAKENING_EXCLUDE` | Which awakening layers become the prompt (empty = all, canonical order) | `identity,shared.reasoning` |
 
+**Toolsets (optional; needs the memory service)** — bind named toolsets to agents so an
+agent can *act*, not just answer (see [Agents from a memory service](#agents-from-a-memory-service)):
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `AGENT_TOOLSETS` | Comma-separated `agent=toolset` pairs; empty = no agent has tools | `invintiry-operator=invintiry` |
+| `INVINTIRY_API_URL` | The Invintiry API the `invintiry` toolset calls | `https://api.invintiry.example` |
+| `INVINTIRY_AGENT_TOKEN` | RS256 agent token minted by the workspace OWNER (shown once at mint) | — |
+
 ---
 
 ## How Do I Use It?
@@ -185,9 +194,32 @@ service, not as code here. A request naming `agent_id` goes through:
    (whole records as sections, index entries as one-liners), in a canonical order with
    unknown layers appended, so a new layer needs no code here. Narrowing is configuration
    (`AWAKENING_LAYERS` / `AWAKENING_EXCLUDE`), never a hidden default.
-4. **Build** — a pydantic-ai `Agent` with that prompt, then the normal chat flow, with
-   history keyed `agent_id:conversation_id` so two agents sharing one brain never share
-   a conversation.
+4. **Build** — a pydantic-ai `Agent` with that prompt and the agent's bound toolsets
+   (below), then the normal chat flow, with history keyed `agent_id:conversation_id` so
+   two agents sharing one brain never share a conversation.
+
+### Toolsets: what an agent may *do*
+
+Tools are code; which agent holds them is configuration. `business_services/toolsets/`
+is a registry of named toolsets (today: `invintiry` — find/get/create/move over the
+Invintiry API via `api_integrations/invintiry/`), and `AGENT_TOOLSETS` binds them to
+agents. Three properties are structural, not stylistic:
+
+- **The prompt lists only real tools.** Every agent's system prompt ends with an
+  *Available Tools* section derived from the toolsets actually bound — `none`, with an
+  instruction to say so, when unbound — so an agent's identity text can never claim a
+  capability the runtime doesn't hold.
+- **Writes cannot run on the model's say-so.** Write tools are registered with
+  `requires_approval`, so a write call *pauses* the run (pydantic-ai deferred tools):
+  the paused state is parked in `pending_approvals` (same SQLite file), the user gets a
+  confirmation line restating the exact call, and only a clear "yes" as the next message
+  resumes and executes it. Anything else denies the call and answers the message
+  normally. The pending row is deleted before resuming, so a crash loses the write
+  rather than doubling it.
+- **API failures are answers, not errors.** The tools return `{"error": …}` data
+  (`unreachable`, `auth_failed`, `ambiguous` with candidates, contract failures like
+  `insufficient_stock`) for the model to phrase; a tool never raises a stack trace into
+  the chat.
 
 ### Data Model
 

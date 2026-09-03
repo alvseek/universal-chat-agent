@@ -136,3 +136,102 @@ def test_transport_failure_is_status_zero():
     with pytest.raises(InvintiryError) as err:
         asyncio.run(_client(handler).search_items("x"))
     assert err.value.status == 0
+
+# -- account linking ---------------------------------------------------------
+#
+# Redeem and unlink are the two calls that do not run on the caller's own
+# inventory token, so what each one *sends* is the thing worth pinning.
+
+
+def test_redeem_link_posts_the_contract_body_with_the_brains_token():
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("Authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            201,
+            json={
+                "token": "user-token-xyz",
+                "user_display_name": "Alvi",
+                "workspace_slug": "alviandi-inventory",
+                "workspace_name": "Alviandi Inventory",
+            },
+        )
+
+    result = asyncio.run(_client(handler).redeem_link("CODE1", 8932435376))
+
+    assert result["token"] == "user-token-xyz"
+    assert result["workspace_slug"] == "alviandi-inventory"
+    assert seen["url"].endswith("/api/telegram-links/redeem/")
+    assert seen["auth"] == "Bearer tok-123"  # whatever this instance was built with
+    assert seen["body"] == {"code": "CODE1", "telegram_user_id": 8932435376}
+
+
+def test_redeem_link_surfaces_a_spent_code_as_400():
+    def handler(request):
+        return httpx.Response(400, json={"detail": "code expired or already used"})
+
+    with pytest.raises(InvintiryError) as exc:
+        asyncio.run(_client(handler).redeem_link("STALE", 1))
+    assert exc.value.status == 400
+    assert "expired" in exc.value.detail
+
+
+def test_redeem_link_surfaces_a_taken_telegram_id_as_409():
+    # The contract's own case: that id already belongs to a different live user.
+    def handler(request):
+        return httpx.Response(409, json={"detail": "already linked to another user"})
+
+    with pytest.raises(InvintiryError) as exc:
+        asyncio.run(_client(handler).redeem_link("CODE1", 1))
+    assert exc.value.status == 409
+
+
+def test_unlink_sends_delete_and_accepts_a_bodyless_204():
+    seen = {}
+
+    def handler(request):
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        return httpx.Response(204)  # no body at all
+
+    asyncio.run(_client(handler).unlink())  # must not raise on empty content
+
+    assert seen["method"] == "DELETE"
+    assert seen["url"].endswith("/api/telegram-links/")
+
+
+def test_unlink_treats_404_as_already_unlinked():
+    def handler(request):
+        return httpx.Response(404, json={"detail": "no link"})
+
+    asyncio.run(_client(handler).unlink())  # success: the wanted state holds
+
+
+def test_unlink_still_raises_on_a_real_failure():
+    # Negative control: 404 is special-cased, everything else must still surface.
+    def handler(request):
+        return httpx.Response(500, text="boom")
+
+    with pytest.raises(InvintiryError) as exc:
+        asyncio.run(_client(handler).unlink())
+    assert exc.value.status == 500
+
+
+def test_a_shared_pool_is_not_closed_by_a_per_caller_instance():
+    # Per-caller clients share one AsyncClient; if aclose() closed it, the first
+    # user to finish a turn would break every other user's connection.
+    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})))
+    borrower = InvintiryClient("https://inv.example", "tok", client=http)
+
+    asyncio.run(borrower.aclose())
+
+    assert not http.is_closed
+
+
+def test_an_owned_pool_is_closed():
+    owner = InvintiryClient("https://inv.example", "tok")
+    asyncio.run(owner.aclose())
+    assert owner._client.is_closed

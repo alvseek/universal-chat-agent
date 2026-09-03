@@ -15,7 +15,7 @@ def _set(monkeypatch, values):
     for name in ("MUNNIN_URL", "MUNNIN_RESOURCE", "MUNNIN_M2M_CLIENT_ID", "MUNNIN_M2M_CLIENT_SECRET",
                  "MUNNIN_M2M_SCOPE", "AUTHENTRA_ISSUER", "AGENT_CACHE_TTL_SECONDS",
                  "AWAKENING_LAYERS", "AWAKENING_EXCLUDE",
-                 "AGENT_TOOLSETS", "INVINTIRY_API_URL", "INVINTIRY_AGENT_TOKEN", *BASE):
+                 "AGENT_TOOLSETS", "INVINTIRY_API_URL", "INVINTIRY_BRAIN_TOKEN", *BASE):
         monkeypatch.delenv(name, raising=False)
     for k, v in {**BASE, **values}.items():
         monkeypatch.setenv(k, v)
@@ -89,10 +89,10 @@ def test_agent_toolsets_malformed_pair_fails_at_startup(monkeypatch):
 
 def test_invintiry_url_requires_token(monkeypatch):
     _set(monkeypatch, {"INVINTIRY_API_URL": "https://api.inv.example/"})
-    with pytest.raises(ValueError, match="INVINTIRY_AGENT_TOKEN"):
+    with pytest.raises(ValueError, match="INVINTIRY_BRAIN_TOKEN"):
         env.load_config()
 
 
 def test_invintiry_config_strips_trailing_slash(monkeypatch):
-    _set(monkeypatch, {"INVINTIRY_API_URL": "https://api.inv.example/", "INVINTIRY_AGENT_TOKEN": "t"})
+    _set(monkeypatch, {"INVINTIRY_API_URL": "https://api.inv.example/", "INVINTIRY_BRAIN_TOKEN": "t"})
     assert env.load_config().invintiry.api_url == "https://api.inv.example"

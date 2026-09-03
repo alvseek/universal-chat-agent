@@ -23,7 +23,7 @@ class _StubService:
         self.raise_not_found = raise_not_found
         self.raise_upstream = raise_upstream
 
-    async def handle(self, conversation_id, message, agent_id=None):
+    async def handle(self, conversation_id, message, agent_id=None, end_user_id=None):
         self.calls.append((conversation_id, message, agent_id))
         if self.raise_not_found:
             raise AgentNotFound(agent_id)

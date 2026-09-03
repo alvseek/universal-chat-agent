@@ -18,12 +18,16 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.tools import DeferredToolRequests
 
+from application.business_services.chat_deps import ChatDeps
+
 from application.business_services.chat_service import ChatService
+from application.business_services.link_service import LinkService
 from application.business_services.toolsets.invintiry import build_invintiry_toolsets
 from application.data_repositories.message_repository import MessageRepository
 from application.data_repositories.pending_approval_repository import (
     PendingApprovalRepository,
 )
+from application.data_repositories.service_link_repository import ServiceLinkRepository
 
 from .test_invintiry_toolset import FakeClient
 
@@ -53,18 +57,59 @@ def _scripted_model(call=MOVE_CALL):
     return FunctionModel(model_fn)
 
 
-def _service(tmp_path, call=MOVE_CALL):
+CALLER = "telegram:1"
+
+
+class _LinkedCaller:
+    """Every message in these tests comes from one linked person.
+
+    A thin wrapper rather than an argument on each call: what these tests are
+    about is the approval gate, and threading an identity through every line
+    would bury that behind plumbing.
+    """
+
+    def __init__(self, service):
+        self._service = service
+
+    async def handle(self, conversation_id, message):
+        return await self._service.handle(
+            conversation_id, message, end_user_id=CALLER
+        )
+
+
+class _StubProvider:
+    """Enough of a link provider for tests that never redeem or revoke."""
+
+    service = "invintiry"
+
+    async def redeem(self, code, end_user_id):  # pragma: no cover - unused here
+        raise AssertionError("these tests do not redeem")
+
+    async def revoke(self, token):
+        return None
+
+
+def _service(tmp_path, call=MOVE_CALL, linked=True):
     client = FakeClient()
-    toolsets = build_invintiry_toolsets({"invintiry_client": client})
+    toolsets = build_invintiry_toolsets(
+        {"invintiry_make_client": lambda _token: client}
+    )
     agent = Agent(
         _scripted_model(call),
         system_prompt="operator",
         toolsets=toolsets,
+        deps_type=ChatDeps,
         output_type=[str, DeferredToolRequests],
     )
     repo = MessageRepository(str(tmp_path / "chat.db"))
     pending = PendingApprovalRepository(str(tmp_path / "chat.db"))
-    return ChatService(agent, repo, 15, None, pending), client, pending
+    links = ServiceLinkRepository(str(tmp_path / "chat.db"))
+    if linked:
+        links.put("invintiry", CALLER, "user-token")
+    service = ChatService(
+        agent, repo, 15, None, pending, LinkService(links, _StubProvider())
+    )
+    return _LinkedCaller(service), client, pending
 
 
 def test_write_pauses_then_yes_executes(tmp_path):

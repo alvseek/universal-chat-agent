@@ -1,4 +1,4 @@
-"""The invintiry toolset: the operator's four tools over the Invintiry API.
+"""The invintiry toolset: the operator's tools over the Invintiry API.
 
 Implements the operator's tool contract (authored in its identity): reads
 resolve names themselves and answer in contract shapes; writes require
@@ -12,8 +12,9 @@ line, and a stack trace has no way to become one.
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
+from pydantic_ai import RunContext
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.toolsets.abstract import AbstractToolset
 
@@ -22,6 +23,9 @@ from application.api_integrations.invintiry.invintiry_client import (
     InvintiryError,
 )
 from application.business_domain import inventory_resolution as resolution
+from application.business_services.chat_deps import ChatDeps
+
+SERVICE = "invintiry"
 
 log = logging.getLogger("universal-chat-agent")
 
@@ -115,19 +119,66 @@ def _location_detail(
     return detail
 
 
-def _api_error(exc: InvintiryError) -> dict[str, Any]:
+def _api_error(
+    exc: InvintiryError, ctx: RunContext[ChatDeps] | None = None
+) -> dict[str, Any]:
     log.warning("invintiry API error %s: %s", exc.status, exc.detail)
     if exc.status == 0:
         return {"error": "unreachable", "detail": "inventory service not reachable"}
     if exc.status in (401, 403):
-        return {"error": "auth_failed", "detail": "inventory credential refused"}
+        # The credential we hold has been revoked at the source — almost always a
+        # disconnect from the web UI. Drop it here, so the next message asks the
+        # person to link again instead of refusing forever with a stale token.
+        if ctx is not None and ctx.deps.on_auth_failed is not None:
+            ctx.deps.on_auth_failed(SERVICE)
+        return {
+            "error": "auth_failed",
+            "detail": (
+                "this person's inventory credential was refused and has been "
+                "forgotten; ask them to connect again from Settings -> Telegram"
+            ),
+        }
     return {"error": "api_error", "detail": exc.detail}
 
 
-def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
-    client: InvintiryClient = deps["invintiry_client"]
+def _not_linked() -> dict[str, Any]:
+    """What every tool answers when this caller has no credential.
 
-    async def _resolve_item(ref: str) -> tuple[int | None, dict[str, Any] | None]:
+    Data, not an exception, and the same contract the API errors already use:
+    the model relays it, so the person is told how to connect rather than being
+    met with silence. It names the service because a caller may be linked to one
+    and not another.
+    """
+    return {
+        "error": "not_linked",
+        "service": SERVICE,
+        "detail": (
+            "this person has not connected their inventory account; ask them to "
+            "open invintiry, go to Settings -> Telegram, and tap the link shown there"
+        ),
+    }
+
+
+def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
+    """Tools bound once, credentials resolved per run.
+
+    ``deps`` supplies only what is the same for everyone (how to build a client);
+    who is calling arrives on each run as ``ctx.deps``.
+    """
+    make_client: Callable[[str], InvintiryClient] = deps["invintiry_make_client"]
+
+    def _client_for(
+        ctx: RunContext[ChatDeps],
+    ) -> tuple[InvintiryClient | None, dict[str, Any] | None]:
+        """(client, unlinked_error) — exactly one of the two is set."""
+        token = (ctx.deps.credentials or {}).get(SERVICE)
+        if not token:
+            return None, _not_linked()
+        return make_client(token), None
+
+    async def _resolve_item(
+        client: InvintiryClient, ref: str
+    ) -> tuple[int | None, dict[str, Any] | None]:
         """(item_id, error_dict) — numeric refs skip the search round-trip."""
         ref = str(ref).strip()
         if ref.lstrip("-").isdigit():  # same numeric rule as inventory_resolution
@@ -140,7 +191,9 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
             return None, {"error": "ambiguous", "candidates": r.candidates}
         return None, {"error": "not_found", "detail": f"no item matches {ref!r}"}
 
-    async def _resolve_location(ref: str) -> tuple[int | None, dict[str, Any] | None]:
+    async def _resolve_location(
+        client: InvintiryClient, ref: str
+    ) -> tuple[int | None, dict[str, Any] | None]:
         ref = str(ref).strip()
         if ref.lstrip("-").isdigit():  # same numeric rule as inventory_resolution
             return int(ref), None
@@ -153,7 +206,7 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
         return None, {"error": "location_not_found", "detail": f"no location matches {ref!r}"}
 
     async def _resolve_location_category(
-        ref: str,
+        client: InvintiryClient, ref: str
     ) -> tuple[int | None, dict[str, Any] | None]:
         """Location categories only — never ``search_categories``, which serves
         items over an identically shaped endpoint, where a borrowed id would be
@@ -173,48 +226,66 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
         }
 
     async def find_items(
-        query: str, low_stock_only: bool = False, limit: int = 10
+        ctx: RunContext[ChatDeps],
+        query: str,
+        low_stock_only: bool = False,
+        limit: int = 10,
     ) -> list[dict[str, Any]] | dict[str, Any]:
         """Search items by name, SKU, or description; empty list means nothing matched."""
+        client, unlinked = _client_for(ctx)
+        if unlinked:
+            return unlinked
         try:
             items = await client.search_items(query, low_stock_only=low_stock_only)
         except InvintiryError as exc:
-            return _api_error(exc)
+            return _api_error(exc, ctx)
         return [_item_brief(i) for i in items[: max(1, limit)]]
 
-    async def get_item(item: str) -> dict[str, Any]:
+    async def get_item(ctx: RunContext[ChatDeps], item: str) -> dict[str, Any]:
         """Full detail for one item; `item` is an id, a SKU, or a name."""
+        client, unlinked = _client_for(ctx)
+        if unlinked:
+            return unlinked
         try:
-            item_id, err = await _resolve_item(item)
+            item_id, err = await _resolve_item(client, item)
             if err:
                 return err
             return _item_detail(await client.get_item(item_id))
         except InvintiryError as exc:
-            return _api_error(exc)
+            return _api_error(exc, ctx)
 
     async def find_locations(
-        query: str = "", limit: int = 10
+        ctx: RunContext[ChatDeps], query: str = "", limit: int = 10
     ) -> list[dict[str, Any]] | dict[str, Any]:
         """Search storage locations by name; empty query lists them all."""
+        client, unlinked = _client_for(ctx)
+        if unlinked:
+            return unlinked
         try:
             locations = await client.search_locations(query)
         except InvintiryError as exc:
-            return _api_error(exc)
+            return _api_error(exc, ctx)
         return [_location_brief(loc) for loc in locations[: max(1, limit)]]
 
-    async def get_location(location: str) -> dict[str, Any]:
+    async def get_location(
+        ctx: RunContext[ChatDeps], location: str
+    ) -> dict[str, Any]:
         """One location and what is stored in it; `location` is an id or a name."""
+        client, unlinked = _client_for(ctx)
+        if unlinked:
+            return unlinked
         try:
-            location_id, err = await _resolve_location(location)
+            location_id, err = await _resolve_location(client, location)
             if err:
                 return err
             dto = await client.get_location(location_id)
             rows = await client.list_item_locations(location_id)
             return _location_detail(dto, rows)
         except InvintiryError as exc:
-            return _api_error(exc)
+            return _api_error(exc, ctx)
 
     async def create_item(
+        ctx: RunContext[ChatDeps],
         name: str,
         location: str,
         quantity: int,
@@ -222,6 +293,9 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
         description: str = "",
     ) -> dict[str, Any]:
         """Create an item and place `quantity` of it in `location` in one step."""
+        client, unlinked = _client_for(ctx)
+        if unlinked:
+            return unlinked
         try:
             existing = await client.search_items(name)
             dup = [i for i in existing if str(i.get("name", "")).lower() == name.lower()]
@@ -231,7 +305,7 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
                     "detail": "an item with that exact name already exists",
                     "existing": _item_brief(dup[0]),
                 }
-            location_id, err = await _resolve_location(location)
+            location_id, err = await _resolve_location(client, location)
             if err:
                 return err
             category_id: int | None = None
@@ -250,23 +324,27 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
             )
             return _item_detail(created)
         except InvintiryError as exc:
-            return _api_error(exc)
+            return _api_error(exc, ctx)
 
     async def move_item(
+        ctx: RunContext[ChatDeps],
         item: str,
         from_location: str,
         to_location: str,
         quantity: int | None = None,
     ) -> dict[str, Any]:
         """Move stock of one item between locations; omit `quantity` to move everything at the source."""
+        client, unlinked = _client_for(ctx)
+        if unlinked:
+            return unlinked
         try:
-            item_id, err = await _resolve_item(item)
+            item_id, err = await _resolve_item(client, item)
             if err:
                 return err
-            from_id, err = await _resolve_location(from_location)
+            from_id, err = await _resolve_location(client, from_location)
             if err:
                 return err
-            to_id, err = await _resolve_location(to_location)
+            to_id, err = await _resolve_location(client, to_location)
             if err:
                 return err
             if from_id == to_id:
@@ -294,19 +372,23 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
                 "movement_id": moved.get("id"),
             }
         except InvintiryError as exc:
-            return _api_error(exc)
+            return _api_error(exc, ctx)
 
     async def create_location(
+        ctx: RunContext[ChatDeps],
         name: str,
         category: str | None = None,
         description: str = "",
         expiry_warning_days: int | None = None,
     ) -> dict[str, Any]:
         """Create a new storage location (a shelf, room, or box)."""
+        client, unlinked = _client_for(ctx)
+        if unlinked:
+            return unlinked
         try:
             category_id: int | None = None
             if category:
-                category_id, err = await _resolve_location_category(category)
+                category_id, err = await _resolve_location_category(client, category)
                 if err:
                     return err
             created = await client.create_location(
@@ -317,9 +399,10 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
             )
             return _location_detail(created, [])
         except InvintiryError as exc:
-            return _api_error(exc)
+            return _api_error(exc, ctx)
 
     async def edit_location(
+        ctx: RunContext[ChatDeps],
         location: str,
         description: str | None = None,
         expiry_warning_days: int | None = None,
@@ -330,8 +413,11 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
         Renaming is not available; only the fields named here can change, and
         anything left out is untouched.
         """
+        client, unlinked = _client_for(ctx)
+        if unlinked:
+            return unlinked
         try:
-            location_id, err = await _resolve_location(location)
+            location_id, err = await _resolve_location(client, location)
             if err:
                 return err
             fields: dict[str, Any] = {}
@@ -340,7 +426,7 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
             if expiry_warning_days is not None:
                 fields["expiry_warning_days"] = expiry_warning_days
             if category is not None:
-                category_id, err = await _resolve_location_category(category)
+                category_id, err = await _resolve_location_category(client, category)
                 if err:
                     return err
                 fields["category"] = category_id
@@ -358,7 +444,7 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
                 rows = None
             return _location_detail(updated, rows)
         except InvintiryError as exc:
-            return _api_error(exc)
+            return _api_error(exc, ctx)
 
     reads = FunctionToolset(
         tools=[find_items, get_item, find_locations, get_location],

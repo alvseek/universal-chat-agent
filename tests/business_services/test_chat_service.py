@@ -38,7 +38,7 @@ class _Registry:
 
 
 def _stub_generate(monkeypatch, seen):
-    async def generate(agent, history, user_msg):
+    async def generate(agent, history, user_msg, deps=None):
         seen.append((agent, list(history), user_msg))
         return f"reply-from-{agent['agent'] if isinstance(agent, dict) else 'default'}"
 

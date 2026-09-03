@@ -15,16 +15,16 @@ def _config(agent_toolsets, invintiry=None):
 
 
 def test_no_bindings_builds_nothing():
-    bindings, client = build_bindings(_config(()))
+    bindings, client, _factory = build_bindings(_config(()))
     assert bindings == {} and client is None
 
 
 def test_binding_with_configured_service_builds_toolsets():
     config = _config(
         (("invintiry-operator", "invintiry"),),
-        invintiry=InvintiryConfig(api_url="https://api.inv.example", token="t"),
+        invintiry=InvintiryConfig(api_url="https://api.inv.example", brain_token="t"),
     )
-    bindings, client = build_bindings(config)
+    bindings, client, _factory = build_bindings(config)
     assert len(bindings["invintiry-operator"]) == 2
     assert client is not None
 

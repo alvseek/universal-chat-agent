@@ -23,7 +23,9 @@ async def health() -> dict:
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     service = request.app.state.chat_service
-    reply = await service.handle(req.conversation_id, req.message, req.agent_id)
+    reply = await service.handle(
+        req.conversation_id, req.message, req.agent_id, req.end_user_id
+    )
     return ChatResponse(reply=reply)
 
 

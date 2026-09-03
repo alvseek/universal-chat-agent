@@ -5,11 +5,13 @@ approval property is asserted on the toolset object itself and separately
 end-to-end in test_chat_approval.py.
 """
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from application.api_integrations.invintiry.invintiry_client import InvintiryError
 from application.business_services import toolsets as registry
+from application.business_services.chat_deps import ChatDeps
 from application.business_services.toolsets.invintiry import build_invintiry_toolsets
 
 ITEM = {
@@ -114,13 +116,31 @@ class FakeClient:
         return {"id": 500}
 
 
+def _deps(client):
+    """Build-time deps: how to make a client, not which client to use.
+
+    Every caller gets the same fake here; what varies per test is the token in
+    the context, which is what the tools actually key on.
+    """
+    return {"invintiry_make_client": lambda _token: client}
+
+
+def _ctx(token="user-token"):
+    """A stand-in RunContext: the tools touch only ``ctx.deps``.
+
+    Passing None for the token models an unlinked caller.
+    """
+    creds = {"invintiry": token} if token else {}
+    return SimpleNamespace(deps=ChatDeps(credentials=creds, end_user_id="telegram:1"))
+
+
 def _tools():
-    reads, writes = build_invintiry_toolsets({"invintiry_client": FakeClient()})
+    reads, writes = build_invintiry_toolsets(_deps(FakeClient()))
     return {**reads.tools, **writes.tools}, reads, writes
 
 
 def _call(tools, _tool, **kwargs):
-    return asyncio.run(tools[_tool].function(**kwargs))
+    return asyncio.run(tools[_tool].function(_ctx(), **kwargs))
 
 
 def test_find_items_maps_to_contract_shape():
@@ -170,8 +190,8 @@ def test_api_failure_becomes_data_not_exception():
         async def search_items(self, query, low_stock_only=False):
             raise InvintiryError(0, "unreachable")
 
-    reads, _ = build_invintiry_toolsets({"invintiry_client": DownClient()})
-    out = asyncio.run(reads.tools["find_items"].function(query="x"))
+    reads, _ = build_invintiry_toolsets(_deps(DownClient()))
+    out = asyncio.run(reads.tools["find_items"].function(_ctx(), query="x"))
     assert out["error"] == "unreachable"
 
 
@@ -182,14 +202,14 @@ def test_writes_require_approval_reads_do_not():
 
 
 def test_registry_builds_and_rejects_unknown():
-    ts = registry.build_toolsets(["invintiry"], {"invintiry_client": FakeClient()})
+    ts = registry.build_toolsets(["invintiry"], _deps(FakeClient()))
     assert len(ts) == 2
     with pytest.raises(ValueError, match="unknown toolset 'nope'"):
         registry.build_toolsets(["nope"], {})
 
 
 def test_describe_toolsets_lists_every_tool_once():
-    ts = registry.build_toolsets(["invintiry"], {"invintiry_client": FakeClient()})
+    ts = registry.build_toolsets(["invintiry"], _deps(FakeClient()))
     lines = registry.describe_toolsets(ts)
     names = [line.split(" — ")[0] for line in lines]
     assert sorted(names) == [
@@ -240,8 +260,8 @@ def test_get_location_caps_contents_but_totals_them_all():
                 for n in range(over)
             ]
 
-    reads, _ = build_invintiry_toolsets({"invintiry_client": Crowded()})
-    out = asyncio.run(reads.tools["get_location"].function(location="Rak B"))
+    reads, _ = build_invintiry_toolsets(_deps(Crowded()))
+    out = asyncio.run(reads.tools["get_location"].function(_ctx(), location="Rak B"))
     assert out["total"] == over
     assert out["truncated"] is True
     assert len(out["contents"]) == mod.LOCATION_CONTENTS_CAP
@@ -256,17 +276,17 @@ def test_get_location_ignores_rows_holding_no_stock():
                 {"item": 2, "item_name": "Here", "location": location_id, "quantity": 3},
             ]
 
-    reads, _ = build_invintiry_toolsets({"invintiry_client": Emptied()})
-    out = asyncio.run(reads.tools["get_location"].function(location="Rak B"))
+    reads, _ = build_invintiry_toolsets(_deps(Emptied()))
+    out = asyncio.run(reads.tools["get_location"].function(_ctx(), location="Rak B"))
     assert [c["item"] for c in out["contents"]] == ["Here"]
     assert out["total"] == 1
 
 
 def test_create_location_resolves_category_from_the_location_tree():
     client = FakeClient()
-    _, writes = build_invintiry_toolsets({"invintiry_client": client})
+    _, writes = build_invintiry_toolsets(_deps(client))
     out = asyncio.run(
-        writes.tools["create_location"].function(name="Rak C", category="gudang-dingin")
+        writes.tools["create_location"].function(_ctx(), name="Rak C", category="gudang-dingin")
     )
     assert out["name"] == "Rak C"
     assert out["contents"] == [] and out["total"] == 0
@@ -294,17 +314,17 @@ def test_create_location_never_reads_the_item_category_tree():
             return [{"id": 999, "name": "Gudang"}]
 
     client = Watched()
-    _, writes = build_invintiry_toolsets({"invintiry_client": client})
-    out = asyncio.run(writes.tools["create_location"].function(name="Rak E", category="Gudang"))
+    _, writes = build_invintiry_toolsets(_deps(client))
+    out = asyncio.run(writes.tools["create_location"].function(_ctx(), name="Rak E", category="Gudang"))
     assert client.item_category_calls == 0
     assert out["id"] == 50
 
 
 def test_edit_location_patches_only_what_was_given():
     client = FakeClient()
-    _, writes = build_invintiry_toolsets({"invintiry_client": client})
+    _, writes = build_invintiry_toolsets(_deps(client))
     out = asyncio.run(
-        writes.tools["edit_location"].function(location="Rak A", description="cold room")
+        writes.tools["edit_location"].function(_ctx(), location="Rak A", description="cold room")
     )
     assert client.patched == [(11, {"description": "cold room"})]
     assert out["description"] == "cold room"
@@ -312,8 +332,8 @@ def test_edit_location_patches_only_what_was_given():
 
 def test_edit_location_maps_a_category_name_to_its_id():
     client = FakeClient()
-    _, writes = build_invintiry_toolsets({"invintiry_client": client})
-    asyncio.run(writes.tools["edit_location"].function(location="Rak A", category="Gudang"))
+    _, writes = build_invintiry_toolsets(_deps(client))
+    asyncio.run(writes.tools["edit_location"].function(_ctx(), location="Rak A", category="Gudang"))
     assert client.patched == [(11, {"category": 3})]
 
 
@@ -326,9 +346,9 @@ def test_edit_location_that_landed_is_never_reported_as_failed():
             raise InvintiryError(0, "unreachable")
 
     client = ContentsDown()
-    _, writes = build_invintiry_toolsets({"invintiry_client": client})
+    _, writes = build_invintiry_toolsets(_deps(client))
     out = asyncio.run(
-        writes.tools["edit_location"].function(location="Rak A", description="cold room")
+        writes.tools["edit_location"].function(_ctx(), location="Rak A", description="cold room")
     )
     assert client.patched == [(11, {"description": "cold room"})]
     assert "error" not in out
@@ -347,7 +367,10 @@ def test_edit_location_cannot_rename():
     """Rename is deliberately out of v1 — the tool must not accept a name."""
     import inspect
 
-    _, writes = build_invintiry_toolsets({"invintiry_client": FakeClient()})
+    _, writes = build_invintiry_toolsets(_deps(FakeClient()))
     params = inspect.signature(writes.tools["edit_location"].function).parameters
     assert "name" not in params
-    assert sorted(params) == ["category", "description", "expiry_warning_days", "location"]
+    # ctx is injected by pydantic-ai, not something the model supplies.
+    assert sorted(p for p in params if p != "ctx") == [
+        "category", "description", "expiry_warning_days", "location",
+    ]

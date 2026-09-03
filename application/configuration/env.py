@@ -45,10 +45,17 @@ class MemoryServiceConfig:
 
 @dataclass(frozen=True)
 class InvintiryConfig:
-    """How to reach the Invintiry inventory API, as the workspace's agent principal."""
+    """How to reach the Invintiry inventory API, and as whom.
+
+    ``brain_token`` is the *brain's own* credential and is used for exactly one
+    call: redeeming a link code, which happens before the person has any token
+    of their own. It is deliberately not workspace-scoped, so one credential
+    serves whichever workspace a code belongs to. Every other call runs on the
+    caller's token, which lives in the link store rather than in configuration.
+    """
 
     api_url: str  # e.g. https://api.invintiry.example
-    token: str    # RS256 agent token minted by the workspace OWNER
+    brain_token: str  # RS256 agent token minted once by an OWNER, for redeem only
 
 
 @dataclass(frozen=True)
@@ -126,7 +133,7 @@ def _invintiry() -> InvintiryConfig | None:
     url = os.getenv("INVINTIRY_API_URL", "").strip().rstrip("/")
     if not url:
         return None
-    return InvintiryConfig(api_url=url, token=_require("INVINTIRY_AGENT_TOKEN"))
+    return InvintiryConfig(api_url=url, brain_token=_require("INVINTIRY_BRAIN_TOKEN"))
 
 
 def load_config() -> Config:

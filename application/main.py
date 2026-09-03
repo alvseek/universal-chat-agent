@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Callable
 
 import httpx
 from fastapi import FastAPI
@@ -25,18 +26,21 @@ from application.api_integrations.authentra.token_provider import (
     TokenError,
 )
 from application.api_integrations.invintiry.invintiry_client import InvintiryClient
+from application.api_integrations.invintiry.link_provider import InvintiryLinkProvider
 from application.api_integrations.munnin.munnin_client import MunninClient, MunninError
 from application.api_integrations.openrouter.llm_client import build_agent
 from application.business_domain import awakening_domain
 from application.business_domain.awakening_domain import AgentNotFound
 from application.business_services.agent_registry import AgentRegistry
 from application.business_services.chat_service import ChatService
+from application.business_services.link_service import LinkService
 from application.business_services.toolsets import build_toolsets, describe_toolsets
 from application.configuration.env import Config, MemoryServiceConfig, load_config
 from application.data_repositories.message_repository import MessageRepository
 from application.data_repositories.pending_approval_repository import (
     PendingApprovalRepository,
 )
+from application.data_repositories.service_link_repository import ServiceLinkRepository
 from application.logger import logger_setup
 from application.middleware.error_handler import (
     handle_not_found,
@@ -48,22 +52,36 @@ from application.middleware.error_handler import (
 log = logging.getLogger("universal-chat-agent")
 
 
-def build_bindings(config: Config) -> tuple[dict[str, list], InvintiryClient | None]:
+def build_bindings(
+    config: Config,
+) -> tuple[dict[str, list], httpx.AsyncClient | None, Callable[[str], InvintiryClient] | None]:
     """agent_id -> instantiated toolsets, from AGENT_TOOLSETS.
 
     Fails at startup — never at chat time — when a binding names an unknown
-    toolset or one whose backing service is not configured. Also returns the
-    invintiry client (if built) so the composition root can close it on shutdown.
+    toolset or one whose backing service is not configured.
+
+    What goes into ``deps`` is only what is identical for every caller: how to
+    build a client, not a built one. The credential arrives per run, because an
+    agent built here is kept warm for hours and answers everybody.
+
+    Returns the shared connection pool (if any) so the composition root can close
+    it on shutdown — the per-caller clients borrow it and never close it — and the
+    client factory itself, so linking uses the very same one rather than a second
+    copy that could drift from it.
     """
     if not config.agent_toolsets:
-        return {}, None
+        return {}, None, None
     deps: dict = {}
-    invintiry_client: InvintiryClient | None = None
+    invintiry_http: httpx.AsyncClient | None = None
+    make_invintiry_client: Callable[[str], InvintiryClient] | None = None
     if config.invintiry:
-        invintiry_client = InvintiryClient(
-            config.invintiry.api_url, config.invintiry.token
-        )
-        deps["invintiry_client"] = invintiry_client
+        invintiry_http = httpx.AsyncClient(timeout=30.0)
+        api_url = config.invintiry.api_url
+
+        def make_invintiry_client(token: str) -> InvintiryClient:  # noqa: F811
+            return InvintiryClient(api_url, token, client=invintiry_http)
+
+        deps["invintiry_make_client"] = make_invintiry_client
     bindings: dict[str, list] = {}
     for agent_id, toolset in config.agent_toolsets:
         try:
@@ -74,7 +92,7 @@ def build_bindings(config: Config) -> tuple[dict[str, list], InvintiryClient | N
                 f"{exc.args[0]!r} — is its service configured (e.g. INVINTIRY_API_URL)?"
             ) from exc
         bindings.setdefault(agent_id, []).extend(built)
-    return bindings, invintiry_client
+    return bindings, invintiry_http, make_invintiry_client
 
 
 def _tools_block(toolsets: list) -> str:
@@ -143,7 +161,7 @@ def create_app() -> FastAPI:
         api_key=config.openrouter_api_key,
         system_prompt=config.system_prompt,
     )
-    bindings, invintiry_client = build_bindings(config)
+    bindings, invintiry_http, make_invintiry_client = build_bindings(config)
     registry: AgentRegistry | None = None
     http: httpx.AsyncClient | None = None
     if config.memory_service:
@@ -154,8 +172,18 @@ def create_app() -> FastAPI:
             "toolsets bind to agents the memory service holds"
         )
     pending = PendingApprovalRepository(config.db_path) if bindings else None
+
+    # Linking exists only where there is a service to link to. Without it the
+    # brain is exactly what it was: an agent with no per-caller credentials.
+    links: LinkService | None = None
+    if config.invintiry and make_invintiry_client is not None:
+        links = LinkService(
+            ServiceLinkRepository(config.db_path),
+            InvintiryLinkProvider(make_invintiry_client, config.invintiry.brain_token),
+        )
+
     service = ChatService(
-        default_agent, repository, config.memory_window, registry, pending
+        default_agent, repository, config.memory_window, registry, pending, links
     )
 
     @asynccontextmanager
@@ -163,8 +191,8 @@ def create_app() -> FastAPI:
         yield
         if http is not None:
             await http.aclose()
-        if invintiry_client is not None:
-            await invintiry_client.aclose()
+        if invintiry_http is not None:
+            await invintiry_http.aclose()
 
     app = FastAPI(title="universal-chat-agent", lifespan=lifespan)
     app.state.config = config

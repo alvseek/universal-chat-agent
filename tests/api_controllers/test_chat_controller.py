@@ -15,7 +15,9 @@ class _StubService:
     def __init__(self):
         self.calls = []
 
-    async def handle(self, conversation_id: str, message: str, agent_id=None) -> str:
+    async def handle(
+        self, conversation_id: str, message: str, agent_id=None, end_user_id=None
+    ) -> str:
         self.calls.append((conversation_id, message))
         return f"echo:{message}"
 

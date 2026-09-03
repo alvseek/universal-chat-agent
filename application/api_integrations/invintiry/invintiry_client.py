@@ -189,5 +189,42 @@ class InvintiryClient:
             "PATCH", f"/api/locations/{location_id}/", json=dict(fields)
         )
 
+    # -- account linking -----------------------------------------------------
+    #
+    # These two are the only calls whose credential is not the caller's own
+    # inventory token, and they differ from each other: redeem runs on the
+    # *brain's* machine token (the person has no token yet — that is the point),
+    # while unlink runs on the *user's* token, because revoking a credential is
+    # something only its holder may ask for. Which instance carries which token
+    # is the caller's business; the client just sends what it was built with.
+
+    async def redeem_link(self, code: str, telegram_user_id: int) -> dict[str, Any]:
+        """POST /api/telegram-links/redeem/ — exchange a one-time code for a token.
+
+        Returns ``{token, user_display_name, workspace_slug, workspace_name}``.
+        Refusals arrive as ``InvintiryError``: 400 for a code that is unknown,
+        already spent or past its five minutes, and 409 when that Telegram id
+        already belongs to a different live user.
+        """
+        return await self._request(
+            "POST",
+            "/api/telegram-links/redeem/",
+            json={"code": code, "telegram_user_id": telegram_user_id},
+        )
+
+    async def unlink(self) -> None:
+        """DELETE /api/telegram-links/ — revoke this token and drop the binding.
+
+        A 404 means nothing was linked, which is the state the caller wanted, so
+        it is success rather than an error: logging out twice is not a failure.
+        """
+        try:
+            await self._request("DELETE", "/api/telegram-links/")
+        except InvintiryError as exc:
+            if exc.status != 404:
+                raise
+
     async def aclose(self) -> None:
-        await self._client.aclose()
+        """Close the connection pool — only if this instance created it."""
+        if self._owns_client:
+            await self._client.aclose()

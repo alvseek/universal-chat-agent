@@ -23,6 +23,8 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolDenied
 from pydantic_ai.toolsets.abstract import AbstractToolset
 
+from application.business_services.chat_deps import ChatDeps
+
 Turn = Tuple[str, str]  # (role, content)
 
 DENIED_MESSAGE = "The user did not confirm. Do not perform the operation."
@@ -57,6 +59,10 @@ def build_agent(
             llm,
             system_prompt=system_prompt,
             toolsets=list(toolsets),
+            # Tools read the caller's credentials from ctx.deps, so the agent
+            # itself holds none: one warm agent serves everyone who talks to
+            # this bot, and each run supplies who is talking.
+            deps_type=ChatDeps,
             output_type=[str, DeferredToolRequests],
         )
     return Agent(llm, system_prompt=system_prompt)
@@ -89,18 +95,26 @@ async def resume(
     *,
     approve: bool,
     followup: str | None = None,
+    deps: ChatDeps | None = None,
 ) -> str | PendingRun:
     """Resume a paused run with one verdict for every paused call.
 
     Approval executes the write(s); denial returns ``DENIED_MESSAGE`` to the
     model, with the user's actual message (``followup``) carried into the same
     run so the reply addresses what they really said.
+
+    ``deps`` matters more here than on a first run: this is the call in which an
+    approved write actually executes, so the credential it runs under is the one
+    passed now — not whatever was in scope when the write was proposed.
     """
     verdict = True if approve else ToolDenied(DENIED_MESSAGE)
     results = DeferredToolResults(approvals={i: verdict for i in approval_ids})
     history = ModelMessagesTypeAdapter.validate_json(pending_messages)
     result = await agent.run(
-        followup, message_history=history, deferred_tool_results=results
+        followup,
+        message_history=history,
+        deferred_tool_results=results,
+        deps=deps,
     )
     return _outcome(result)
 
@@ -116,11 +130,18 @@ def _to_history(history: List[Turn]) -> List[ModelMessage]:
     return messages
 
 
-async def generate(agent: Agent, history: List[Turn], user_msg: str) -> str | PendingRun:
+async def generate(
+    agent: Agent,
+    history: List[Turn],
+    user_msg: str,
+    deps: ChatDeps | None = None,
+) -> str | PendingRun:
     """Run the agent for one user message, given prior conversation history.
 
     Returns the reply text — or a ``PendingRun`` when a write tool paused the
     run awaiting the user's confirmation (tool-bound agents only).
     """
-    result = await agent.run(user_msg, message_history=_to_history(history))
+    result = await agent.run(
+        user_msg, message_history=_to_history(history), deps=deps
+    )
     return _outcome(result)

@@ -21,7 +21,14 @@ class Resolution:
 
 
 def _brief(record: Mapping[str, Any]) -> dict[str, Any]:
-    return {k: record.get(k) for k in ("id", "name", "sku") if record.get(k) is not None}
+    """Just enough to tell candidates apart when the caller asks the user which.
+
+    ``slug`` is carried because a location category's name is optional upstream,
+    and a candidate reading ``{"id": 3}`` alone is nothing a person can choose
+    between.
+    """
+    keys = ("id", "name", "sku", "slug")
+    return {k: record.get(k) for k in keys if record.get(k) is not None}
 
 
 def _resolve(records: Sequence[Mapping[str, Any]], ref: str, keys: Sequence[str]) -> Resolution:
@@ -58,3 +65,11 @@ def resolve_item(items: Sequence[Mapping[str, Any]], ref: str) -> Resolution:
 def resolve_location(locations: Sequence[Mapping[str, Any]], ref: str) -> Resolution:
     """id → name (locations have no SKU; names are unique per workspace)."""
     return _resolve(locations, ref, ("name",))
+
+
+def resolve_location_category(
+    categories: Sequence[Mapping[str, Any]], ref: str
+) -> Resolution:
+    """id → name → slug. Slug is included because a location category's name is
+    optional upstream while its slug is always set, so name alone can miss."""
+    return _resolve(categories, ref, ("name", "slug"))

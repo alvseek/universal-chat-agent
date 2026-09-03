@@ -9,7 +9,7 @@ appears here.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 
@@ -32,8 +32,13 @@ class InvintiryClient:
         self, base_url: str, token: str, client: httpx.AsyncClient | None = None
     ) -> None:
         self._base = base_url.rstrip("/")
-        # Injectable so tests can hand in a client with a mock transport.
+        # Injectable so tests can hand in a client with a mock transport, and so
+        # the per-caller instances built each chat turn can share one connection
+        # pool instead of opening their own.
         self._client = client or httpx.AsyncClient(timeout=30.0)
+        # Only the instance that created the pool may close it: a per-caller
+        # instance closing a shared client would break every other caller.
+        self._owns_client = client is None
         self._headers = {"Authorization": f"Bearer {token}"}
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -49,6 +54,8 @@ class InvintiryClient:
             except ValueError:
                 detail = resp.text
             raise InvintiryError(resp.status_code, str(detail)[:300])
+        if resp.status_code == 204 or not resp.content:
+            return None  # a bodyless success (DELETE) is not a JSON document
         return resp.json()
 
     # -- reads ---------------------------------------------------------------
@@ -71,8 +78,41 @@ class InvintiryClient:
         return await self._request("GET", "/api/locations/", params={"search": query})
 
     async def search_categories(self, query: str) -> list[dict[str, Any]]:
-        """GET /api/categories/?search= — unpaginated list of CategoryDTO."""
+        """GET /api/categories/?search= — unpaginated list of CategoryDTO.
+
+        Item categories. Locations hang off a *separate* tree — see
+        ``search_location_categories``; the two share a shape and nothing else.
+        """
         return await self._request("GET", "/api/categories/", params={"search": query})
+
+    async def get_location(self, location_id: int) -> dict[str, Any]:
+        """GET /api/locations/{id}/ — one LocationDTO.
+
+        Integer ids only: the deployed schema documents this path parameter as
+        an integer, so callers resolve a name to an id first.
+        """
+        return await self._request("GET", f"/api/locations/{location_id}/")
+
+    async def list_item_locations(self, location_id: int) -> list[dict[str, Any]]:
+        """GET /api/item-locations/?location= — what is stored in one location.
+
+        Each row carries ``item_name`` and ``quantity``, so naming the contents
+        needs no follow-up call per item.
+        """
+        return await self._request(
+            "GET", "/api/item-locations/", params={"location": location_id}
+        )
+
+    async def search_location_categories(self, query: str) -> list[dict[str, Any]]:
+        """GET /api/location-categories/?search= — unpaginated LocationCategoryDTO.
+
+        Deliberately not ``search_categories``: that one serves items, and the
+        two endpoints take identical parameters over different tables, so an id
+        borrowed from the wrong tree can be valid and wrong rather than refused.
+        """
+        return await self._request(
+            "GET", "/api/location-categories/", params={"search": query}
+        )
 
     # -- writes --------------------------------------------------------------
 
@@ -114,6 +154,39 @@ class InvintiryClient:
                 "quantity": quantity,
                 "notes": notes,
             },
+        )
+
+    async def create_location(
+        self,
+        name: str,
+        category_id: int | None = None,
+        description: str = "",
+        expiry_warning_days: int | None = None,
+    ) -> dict[str, Any]:
+        """POST /api/locations/ — create a storage location (LocationDTO back).
+
+        Only ``name`` is required by the API, and it is unique per workspace, so
+        a clashing name comes back as the API's own 400 rather than needing a
+        pre-check here.
+        """
+        body: dict[str, Any] = {"name": name, "description": description}
+        if category_id is not None:
+            body["category"] = category_id
+        if expiry_warning_days is not None:
+            body["expiry_warning_days"] = expiry_warning_days
+        return await self._request("POST", "/api/locations/", json=body)
+
+    async def update_location(
+        self, location_id: int, fields: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """PATCH /api/locations/{id}/ — partial update (LocationDTO back).
+
+        ``fields`` carries only what changes; anything absent is left alone by
+        the server. The caller is responsible for never putting a read-only
+        field (``slug``, the counts) in there.
+        """
+        return await self._request(
+            "PATCH", f"/api/locations/{location_id}/", json=dict(fields)
         )
 
     async def aclose(self) -> None:

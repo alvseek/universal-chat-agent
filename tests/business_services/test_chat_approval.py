@@ -28,8 +28,16 @@ from application.data_repositories.pending_approval_repository import (
 from .test_invintiry_toolset import FakeClient
 
 
-def _scripted_model():
-    """Calls move_item on first contact; answers with the tool's result after."""
+MOVE_CALL = (
+    "move_item",
+    {"item": "EL-001", "from_location": "Rak B", "to_location": "Rak A", "quantity": 3},
+)
+CREATE_LOCATION_CALL = ("create_location", {"name": "Rak C", "category": "Gudang"})
+
+
+def _scripted_model(call=MOVE_CALL):
+    """Calls the given write tool on first contact; answers with its result after."""
+    tool_name, args = call
 
     def model_fn(messages, info):
         returns = [
@@ -40,28 +48,16 @@ def _scripted_model():
         ]
         if returns:
             return ModelResponse(parts=[TextPart(f"result: {returns[-1].content}")])
-        return ModelResponse(
-            parts=[
-                ToolCallPart(
-                    tool_name="move_item",
-                    args={
-                        "item": "EL-001",
-                        "from_location": "Rak B",
-                        "to_location": "Rak A",
-                        "quantity": 3,
-                    },
-                )
-            ]
-        )
+        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args)])
 
     return FunctionModel(model_fn)
 
 
-def _service(tmp_path):
+def _service(tmp_path, call=MOVE_CALL):
     client = FakeClient()
     toolsets = build_invintiry_toolsets({"invintiry_client": client})
     agent = Agent(
-        _scripted_model(),
+        _scripted_model(call),
         system_prompt="operator",
         toolsets=toolsets,
         output_type=[str, DeferredToolRequests],
@@ -92,6 +88,34 @@ def test_anything_but_yes_denies(tmp_path):
     reply = asyncio.run(service.handle("c2", "hmm actually wait"))
     assert client.transfers == []
     assert pending.get("c2") is None
+    assert "did not confirm" in reply.lower()
+
+
+def test_creating_a_location_pauses_the_same_way(tmp_path):
+    """The gate is a property of the writes toolset, not of move_item — a newly
+    added write inherits it, and the confirmation line names the real call."""
+    service, client, pending = _service(tmp_path, call=CREATE_LOCATION_CALL)
+    before = len(client.locations)
+
+    reply1 = asyncio.run(service.handle("c5", "add a shelf called Rak C"))
+    assert "confirm" in reply1.lower() and "create_location" in reply1
+    assert "Rak C" in reply1
+    assert len(client.locations) == before  # nothing created yet
+
+    reply2 = asyncio.run(service.handle("c5", "yes"))
+    assert [l["name"] for l in client.locations][-1] == "Rak C"
+    assert pending.get("c5") is None
+    assert "result:" in reply2
+
+
+def test_creating_a_location_denied_leaves_nothing_behind(tmp_path):
+    service, client, pending = _service(tmp_path, call=CREATE_LOCATION_CALL)
+    before = len(client.locations)
+
+    asyncio.run(service.handle("c6", "add a shelf called Rak C"))
+    reply = asyncio.run(service.handle("c6", "no wait"))
+    assert len(client.locations) == before
+    assert pending.get("c6") is None
     assert "did not confirm" in reply.lower()
 
 

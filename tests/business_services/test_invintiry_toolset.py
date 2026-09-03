@@ -23,11 +23,70 @@ ITEM = {
 }
 
 
+def _loc(id_, name, **extra):
+    """A LocationDTO-shaped row — the counts are what the real API annotates."""
+    return {
+        "id": id_, "name": name, "slug": name.lower().replace(" ", "-"),
+        "description": "", "expiry_warning_days": None,
+        "category": None, "category_name": None, "tags": [],
+        "item_count": 0, "expiring_soon_count": 0, "expired_count": 0,
+        **extra,
+    }
+
+
 class FakeClient:
     def __init__(self):
         self.items = [ITEM]
-        self.locations = [{"id": 10, "name": "Rak B"}, {"id": 11, "name": "Rak A"}]
+        self.locations = [
+            _loc(10, "Rak B", item_count=1, category_name="Gudang", category=3),
+            _loc(11, "Rak A", item_count=1),
+        ]
+        self.location_categories = [
+            {"id": 3, "name": "Gudang", "slug": "gudang"},
+            {"id": 4, "name": "", "slug": "gudang-dingin"},
+        ]
         self.transfers = []
+        self.patched = []
+
+    async def get_location(self, location_id):
+        for l in self.locations:
+            if l["id"] == location_id:
+                return l
+        raise InvintiryError(404, "Not found.")
+
+    async def list_item_locations(self, location_id):
+        rows = []
+        for i in self.items:
+            for il in i["item_locations"]:
+                if il["location"] == location_id:
+                    rows.append({
+                        "item": i["id"], "item_name": i["name"],
+                        "location": location_id, "quantity": il["quantity"],
+                        "expires_at": il.get("expires_at"),
+                    })
+        return rows
+
+    async def search_location_categories(self, query):
+        q = query.lower()
+        return [
+            c for c in self.location_categories
+            if q in (c.get("name") or "").lower() or q in c["slug"].lower()
+        ]
+
+    async def create_location(self, name, category_id=None, description="",
+                              expiry_warning_days=None):
+        row = _loc(50, name, description=description, category=category_id,
+                   expiry_warning_days=expiry_warning_days)
+        self.locations.append(row)
+        return row
+
+    async def update_location(self, location_id, fields):
+        self.patched.append((location_id, dict(fields)))
+        for l in self.locations:
+            if l["id"] == location_id:
+                l.update(fields)
+                return l
+        raise InvintiryError(404, "Not found.")
 
     async def search_items(self, query, low_stock_only=False):
         q = query.lower()
@@ -133,5 +192,162 @@ def test_describe_toolsets_lists_every_tool_once():
     ts = registry.build_toolsets(["invintiry"], {"invintiry_client": FakeClient()})
     lines = registry.describe_toolsets(ts)
     names = [line.split(" — ")[0] for line in lines]
-    assert sorted(names) == ["create_item", "find_items", "get_item", "move_item"]
+    assert sorted(names) == [
+        "create_item", "create_location", "edit_location", "find_items",
+        "find_locations", "get_item", "get_location", "move_item",
+    ]
     assert all(" — " in line for line in lines)
+
+
+# -- locations ---------------------------------------------------------------
+
+
+def test_find_locations_lists_all_on_empty_query():
+    tools, _, _ = _tools()
+    out = _call(tools, "find_locations")
+    assert out == [
+        {"id": 10, "name": "Rak B", "category": "Gudang", "item_count": 1},
+        {"id": 11, "name": "Rak A", "category": None, "item_count": 1},
+    ]
+
+
+def test_get_location_carries_its_contents():
+    tools, _, _ = _tools()
+    out = _call(tools, "get_location", location="Rak B")
+    assert out["id"] == 10 and out["category"] == "Gudang"
+    assert out["contents"] == [{"item": "Kabel HDMI 2m", "quantity": 5, "expires_at": None}]
+    assert (out["total"], out["truncated"]) == (1, False)
+
+
+def test_get_location_not_found_and_ambiguous():
+    tools, _, _ = _tools()
+    assert _call(tools, "get_location", location="Nowhere")["error"] == "location_not_found"
+    assert _call(tools, "get_location", location="Rak")["error"] == "location_ambiguous"
+
+
+def test_get_location_caps_contents_but_totals_them_all():
+    """A clipped list must still report how many are really there — otherwise
+    the operator says '20 items' about a shelf holding 25."""
+    from application.business_services.toolsets import invintiry as mod
+
+    over = mod.LOCATION_CONTENTS_CAP + 5
+
+    class Crowded(FakeClient):
+        async def list_item_locations(self, location_id):
+            return [
+                {"item": n, "item_name": f"Item {n:02d}", "location": location_id,
+                 "quantity": 1, "expires_at": None}
+                for n in range(over)
+            ]
+
+    reads, _ = build_invintiry_toolsets({"invintiry_client": Crowded()})
+    out = asyncio.run(reads.tools["get_location"].function(location="Rak B"))
+    assert out["total"] == over
+    assert out["truncated"] is True
+    assert len(out["contents"]) == mod.LOCATION_CONTENTS_CAP
+    assert out["contents"][0]["item"] == "Item 00"  # sorted by name, not arrival
+
+
+def test_get_location_ignores_rows_holding_no_stock():
+    class Emptied(FakeClient):
+        async def list_item_locations(self, location_id):
+            return [
+                {"item": 1, "item_name": "Gone", "location": location_id, "quantity": 0},
+                {"item": 2, "item_name": "Here", "location": location_id, "quantity": 3},
+            ]
+
+    reads, _ = build_invintiry_toolsets({"invintiry_client": Emptied()})
+    out = asyncio.run(reads.tools["get_location"].function(location="Rak B"))
+    assert [c["item"] for c in out["contents"]] == ["Here"]
+    assert out["total"] == 1
+
+
+def test_create_location_resolves_category_from_the_location_tree():
+    client = FakeClient()
+    _, writes = build_invintiry_toolsets({"invintiry_client": client})
+    out = asyncio.run(
+        writes.tools["create_location"].function(name="Rak C", category="gudang-dingin")
+    )
+    assert out["name"] == "Rak C"
+    assert out["contents"] == [] and out["total"] == 0
+    # Matched on slug alone: category 4 has no name upstream, which is exactly
+    # why resolution looks at slug as well as name.
+    assert client.locations[-1]["category"] == 4
+
+
+def test_create_location_refuses_an_unknown_category_rather_than_making_one():
+    tools, _, _ = _tools()
+    out = _call(tools, "create_location", name="Rak D", category="basement")
+    assert out["error"] == "category_not_found"
+
+
+def test_create_location_never_reads_the_item_category_tree():
+    """The two endpoints take identical parameters over different tables, so a
+    borrowed id would be accepted as a valid row from the wrong tree."""
+    class Watched(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.item_category_calls = 0
+
+        async def search_categories(self, query):
+            self.item_category_calls += 1
+            return [{"id": 999, "name": "Gudang"}]
+
+    client = Watched()
+    _, writes = build_invintiry_toolsets({"invintiry_client": client})
+    out = asyncio.run(writes.tools["create_location"].function(name="Rak E", category="Gudang"))
+    assert client.item_category_calls == 0
+    assert out["id"] == 50
+
+
+def test_edit_location_patches_only_what_was_given():
+    client = FakeClient()
+    _, writes = build_invintiry_toolsets({"invintiry_client": client})
+    out = asyncio.run(
+        writes.tools["edit_location"].function(location="Rak A", description="cold room")
+    )
+    assert client.patched == [(11, {"description": "cold room"})]
+    assert out["description"] == "cold room"
+
+
+def test_edit_location_maps_a_category_name_to_its_id():
+    client = FakeClient()
+    _, writes = build_invintiry_toolsets({"invintiry_client": client})
+    asyncio.run(writes.tools["edit_location"].function(location="Rak A", category="Gudang"))
+    assert client.patched == [(11, {"category": 3})]
+
+
+def test_edit_location_that_landed_is_never_reported_as_failed():
+    """The PATCH succeeds, reading the contents back does not. The edit must not
+    come back as an error, or the user re-confirms a write that already ran —
+    and it must not claim the location is empty either."""
+    class ContentsDown(FakeClient):
+        async def list_item_locations(self, location_id):
+            raise InvintiryError(0, "unreachable")
+
+    client = ContentsDown()
+    _, writes = build_invintiry_toolsets({"invintiry_client": client})
+    out = asyncio.run(
+        writes.tools["edit_location"].function(location="Rak A", description="cold room")
+    )
+    assert client.patched == [(11, {"description": "cold room"})]
+    assert "error" not in out
+    assert out["contents_unavailable"] is True
+    assert "total" not in out and "contents" not in out  # never "the shelf is empty"
+    assert out["description"] == "cold room"
+
+
+def test_edit_location_with_nothing_to_change_says_so():
+    tools, _, _ = _tools()
+    out = _call(tools, "edit_location", location="Rak A")
+    assert out["error"] == "nothing_to_change"
+
+
+def test_edit_location_cannot_rename():
+    """Rename is deliberately out of v1 — the tool must not accept a name."""
+    import inspect
+
+    _, writes = build_invintiry_toolsets({"invintiry_client": FakeClient()})
+    params = inspect.signature(writes.tools["edit_location"].function).parameters
+    assert "name" not in params
+    assert sorted(params) == ["category", "description", "expiry_warning_days", "location"]

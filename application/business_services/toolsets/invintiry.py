@@ -12,7 +12,7 @@ line, and a stack trace has no way to become one.
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.toolsets.abstract import AbstractToolset
@@ -24,6 +24,12 @@ from application.api_integrations.invintiry.invintiry_client import (
 from application.business_domain import inventory_resolution as resolution
 
 log = logging.getLogger("universal-chat-agent")
+
+# How many stored items one ``get_location`` answer carries. Fixed here rather
+# than exposed as a tool argument: the cap exists to keep a crowded shelf from
+# flooding the reply, and an argument would let the model ask for all of it.
+# The answer always carries ``total``, so a clipped list is never miscounted.
+LOCATION_CONTENTS_CAP = 20
 
 
 def _item_brief(dto: Mapping[str, Any]) -> dict[str, Any]:
@@ -50,6 +56,62 @@ def _item_detail(dto: Mapping[str, Any]) -> dict[str, Any]:
     )
     for loc, raw in zip(detail["locations"], dto.get("item_locations") or []):
         loc["expires_at"] = raw.get("expires_at")
+    return detail
+
+
+def _location_brief(dto: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": dto.get("id"),
+        "name": dto.get("name"),
+        "category": dto.get("category_name"),
+        "item_count": dto.get("item_count"),
+    }
+
+
+def _location_detail(
+    dto: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] | None
+) -> dict[str, Any]:
+    """A location plus what is stored in it.
+
+    ``rows`` are the item-location records for this location. Only rows holding
+    stock are contents — which is also how the API counts ``item_count``, so the
+    two numbers cannot disagree. ``total`` counts everything stored here and
+    ``truncated`` says whether the list below it was clipped.
+
+    ``rows=None`` means the contents were never fetched, which is not the same
+    as a location holding nothing: the contents keys are then left out entirely
+    and ``contents_unavailable`` is set, because a ``total`` of 0 would be read
+    as an empty shelf.
+    """
+    if rows is None:
+        detail = _location_brief(dto)
+        detail.update(
+            description=dto.get("description"),
+            expiry_warning_days=dto.get("expiry_warning_days"),
+            contents_unavailable=True,
+        )
+        return detail
+    stored = sorted(
+        (r for r in rows if (r.get("quantity") or 0) > 0),
+        key=lambda r: str(r.get("item_name") or "").lower(),
+    )
+    detail = _location_brief(dto)
+    detail.update(
+        description=dto.get("description"),
+        expiry_warning_days=dto.get("expiry_warning_days"),
+        expiring_soon=dto.get("expiring_soon_count"),
+        expired=dto.get("expired_count"),
+        total=len(stored),
+        truncated=len(stored) > LOCATION_CONTENTS_CAP,
+        contents=[
+            {
+                "item": r.get("item_name"),
+                "quantity": r.get("quantity"),
+                "expires_at": r.get("expires_at"),
+            }
+            for r in stored[:LOCATION_CONTENTS_CAP]
+        ],
+    )
     return detail
 
 
@@ -90,6 +152,26 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
             return None, {"error": "location_ambiguous", "candidates": r.candidates}
         return None, {"error": "location_not_found", "detail": f"no location matches {ref!r}"}
 
+    async def _resolve_location_category(
+        ref: str,
+    ) -> tuple[int | None, dict[str, Any] | None]:
+        """Location categories only — never ``search_categories``, which serves
+        items over an identically shaped endpoint, where a borrowed id would be
+        accepted as a valid row from the wrong tree instead of refused."""
+        ref = str(ref).strip()
+        if ref.lstrip("-").isdigit():  # same numeric rule as inventory_resolution
+            return int(ref), None
+        cats = await client.search_location_categories(ref)
+        r = resolution.resolve_location_category(cats, ref)
+        if r.kind == "match":
+            return r.id, None
+        if r.kind == "ambiguous":
+            return None, {"error": "category_ambiguous", "candidates": r.candidates}
+        return None, {
+            "error": "category_not_found",
+            "detail": f"no location category matches {ref!r}",
+        }
+
     async def find_items(
         query: str, low_stock_only: bool = False, limit: int = 10
     ) -> list[dict[str, Any]] | dict[str, Any]:
@@ -107,6 +189,28 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
             if err:
                 return err
             return _item_detail(await client.get_item(item_id))
+        except InvintiryError as exc:
+            return _api_error(exc)
+
+    async def find_locations(
+        query: str = "", limit: int = 10
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Search storage locations by name; empty query lists them all."""
+        try:
+            locations = await client.search_locations(query)
+        except InvintiryError as exc:
+            return _api_error(exc)
+        return [_location_brief(loc) for loc in locations[: max(1, limit)]]
+
+    async def get_location(location: str) -> dict[str, Any]:
+        """One location and what is stored in it; `location` is an id or a name."""
+        try:
+            location_id, err = await _resolve_location(location)
+            if err:
+                return err
+            dto = await client.get_location(location_id)
+            rows = await client.list_item_locations(location_id)
+            return _location_detail(dto, rows)
         except InvintiryError as exc:
             return _api_error(exc)
 
@@ -192,8 +296,77 @@ def build_invintiry_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
         except InvintiryError as exc:
             return _api_error(exc)
 
-    reads = FunctionToolset(tools=[find_items, get_item], id="invintiry-reads")
+    async def create_location(
+        name: str,
+        category: str | None = None,
+        description: str = "",
+        expiry_warning_days: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a new storage location (a shelf, room, or box)."""
+        try:
+            category_id: int | None = None
+            if category:
+                category_id, err = await _resolve_location_category(category)
+                if err:
+                    return err
+            created = await client.create_location(
+                name,
+                category_id=category_id,
+                description=description,
+                expiry_warning_days=expiry_warning_days,
+            )
+            return _location_detail(created, [])
+        except InvintiryError as exc:
+            return _api_error(exc)
+
+    async def edit_location(
+        location: str,
+        description: str | None = None,
+        expiry_warning_days: int | None = None,
+        category: str | None = None,
+    ) -> dict[str, Any]:
+        """Change a location's description, expiry warning days, or category.
+
+        Renaming is not available; only the fields named here can change, and
+        anything left out is untouched.
+        """
+        try:
+            location_id, err = await _resolve_location(location)
+            if err:
+                return err
+            fields: dict[str, Any] = {}
+            if description is not None:
+                fields["description"] = description
+            if expiry_warning_days is not None:
+                fields["expiry_warning_days"] = expiry_warning_days
+            if category is not None:
+                category_id, err = await _resolve_location_category(category)
+                if err:
+                    return err
+                fields["category"] = category_id
+            if not fields:
+                return {"error": "nothing_to_change", "detail": "no fields given to edit"}
+            updated = await client.update_location(location_id, fields)
+            # The change has already landed. A failure reading the contents back
+            # must not be reported as a failed edit — the user would be told a
+            # write did not happen when it did, and would confirm it a second
+            # time. Degrade to the record without its contents instead.
+            try:
+                rows = await client.list_item_locations(location_id)
+            except InvintiryError as exc:
+                log.warning("edit_location applied but contents unread: %s", exc.detail)
+                rows = None
+            return _location_detail(updated, rows)
+        except InvintiryError as exc:
+            return _api_error(exc)
+
+    reads = FunctionToolset(
+        tools=[find_items, get_item, find_locations, get_location],
+        id="invintiry-reads",
+    )
     writes = FunctionToolset(
-        tools=[create_item, move_item], id="invintiry-writes", requires_approval=True
+        tools=[create_item, move_item, create_location, edit_location],
+        id="invintiry-writes",
+        requires_approval=True,
     )
     return [reads, writes]

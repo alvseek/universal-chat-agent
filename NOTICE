@@ -1,0 +1,7 @@
+universal-chat-agent
+Copyright 2026 Alviandi Widiasto (alvseek)
+
+This product — a bridge-agnostic chat agent served over HTTP, being one
+reusable brain (model, memory and tool loop) that any chat front-end can call —
+is licensed under the Apache License, Version 2.0. See the LICENSE file at the
+root of this repository, or http://www.apache.org/licenses/LICENSE-2.0

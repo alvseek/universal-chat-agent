@@ -1,14 +1,17 @@
 """External integration: invintiry's side of account linking.
 
 Two calls, and the only place that knows how a namespaced ``end_user_id`` maps
-onto what invintiry's endpoint expects. That mapping lives here on purpose: the
-store keys people as ``telegram:8932435376`` so two platforms can never collide,
-while invintiry's redeem endpoint wants a bare Telegram integer — and the module
-that already speaks invintiry's wire shapes is the right one to know it.
+onto what invintiry's endpoints expect. That mapping lives here on purpose: the
+store keys people as ``telegram:8932435376`` or ``whatsapp:6282311020200`` so
+two services can never collide, while invintiry wants the service and the
+account id as two separate fields — and the module that already speaks
+invintiry's wire shapes is the right one to know it.
 
-A consequence worth stating plainly: this provider can only link *Telegram*
-users, because that is what invintiry's endpoint accepts. An id from any other
-platform is refused here rather than sent upstream to be rejected there.
+Nothing here enumerates the services. Invintiry owns that registry and validates
+both the service name and the shape of an account id, so a transport added to
+the bridge reaches inventory with no change on this side. An id refused *here*
+is one that is malformed — no service, or no account — never one belonging to a
+service this module has not heard of, because it has heard of none of them.
 """
 from __future__ import annotations
 
@@ -20,11 +23,9 @@ from application.api_integrations.invintiry.invintiry_client import (
     InvintiryError,
 )
 
-TELEGRAM_PREFIX = "telegram:"
-
 
 class UnsupportedPlatform(ValueError):
-    """This provider was handed an end user it cannot link (not a Telegram id)."""
+    """The end user id was not a ``platform:account`` pair this module could split."""
 
 
 @dataclass(frozen=True)
@@ -36,17 +37,19 @@ class LinkedAccount:
     workspace_name: str
 
 
-def telegram_id(end_user_id: str) -> int:
-    """``telegram:8932435376`` -> ``8932435376``, or refuse."""
-    if not end_user_id.startswith(TELEGRAM_PREFIX):
+def split_end_user_id(end_user_id: str) -> tuple[str, str]:
+    """``whatsapp:6282311020200`` -> ``("whatsapp", "6282311020200")``, or refuse.
+
+    Splits on the *first* colon only: an account id is free to contain one and a
+    service name never does, so anything after the first separator belongs to
+    the account.
+    """
+    platform, separator, external_id = (end_user_id or "").partition(":")
+    if not separator or not platform or not external_id:
         raise UnsupportedPlatform(
-            f"invintiry linking is Telegram-only; got {end_user_id!r}"
+            f"not a platform-namespaced end user id: {end_user_id!r}"
         )
-    raw = end_user_id[len(TELEGRAM_PREFIX):]
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise UnsupportedPlatform(f"not a Telegram user id: {raw!r}") from exc
+    return platform, external_id
 
 
 class InvintiryLinkProvider:
@@ -61,11 +64,12 @@ class InvintiryLinkProvider:
         self._brain_token = brain_token
 
     async def redeem(self, code: str, end_user_id: str) -> LinkedAccount:
+        platform, external_id = split_end_user_id(end_user_id)
         # The brain's token, not the user's: the whole point is that they have
         # none yet. It is deliberately not workspace-scoped, so one credential
         # serves whichever workspace the code belongs to.
         client = self._make_client(self._brain_token)
-        payload = await client.redeem_link(code, telegram_id(end_user_id))
+        payload = await client.redeem_link(code, platform, external_id)
         token = (payload or {}).get("token")
         if not token:
             # A 201 with no credential in it. Rare, but the person is mid-flow,
@@ -80,6 +84,12 @@ class InvintiryLinkProvider:
             or "your workspace",
         )
 
-    async def revoke(self, token: str) -> None:
-        """Revoke server-side using the credential being revoked."""
-        await self._make_client(token).unlink()
+    async def revoke(self, token: str, end_user_id: str) -> None:
+        """Revoke server-side using the credential being revoked.
+
+        The end user id comes back in because chat-side logout is addressed per
+        service — a token may only disconnect its own — so the service has to be
+        named even though the credential already identifies the person.
+        """
+        platform, _ = split_end_user_id(end_user_id)
+        await self._make_client(token).unlink(platform)

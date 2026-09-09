@@ -141,7 +141,7 @@ class _Provider:
     async def redeem(self, code, end_user_id):  # pragma: no cover - not used here
         raise AssertionError("not exercised")
 
-    async def revoke(self, token):
+    async def revoke(self, token, end_user_id):
         return None
 
 

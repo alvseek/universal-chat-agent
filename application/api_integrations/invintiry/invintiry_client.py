@@ -198,28 +198,42 @@ class InvintiryClient:
     # something only its holder may ask for. Which instance carries which token
     # is the caller's business; the client just sends what it was built with.
 
-    async def redeem_link(self, code: str, telegram_user_id: int) -> dict[str, Any]:
-        """POST /api/telegram-links/redeem/ — exchange a one-time code for a token.
+    async def redeem_link(
+        self, code: str, platform: str, external_id: str
+    ) -> dict[str, Any]:
+        """POST /api/chat-links/redeem/ — exchange a one-time code for a token.
 
-        Returns ``{token, user_display_name, workspace_slug, workspace_name}``.
+        The service-neutral route, taking the service by name, so adding a chat
+        transport needs no endpoint or field rename here. Returns
+        ``{token, user_display_name, workspace_slug, workspace_name}``.
+
         Refusals arrive as ``InvintiryError``: 400 for a code that is unknown,
-        already spent or past its five minutes, and 409 when that Telegram id
-        already belongs to a different live user.
+        already spent or past its five minutes — and also for a service
+        invintiry does not offer or an account id malformed for it, which is why
+        the caller logs the detail rather than assuming every 400 is a bad code.
+        409 means that chat account already belongs to a different live user.
         """
         return await self._request(
             "POST",
-            "/api/telegram-links/redeem/",
-            json={"code": code, "telegram_user_id": telegram_user_id},
+            "/api/chat-links/redeem/",
+            json={"code": code, "platform": platform, "external_id": external_id},
         )
 
-    async def unlink(self) -> None:
-        """DELETE /api/telegram-links/ — revoke this token and drop the binding.
+    async def unlink(self, platform: str) -> None:
+        """DELETE /api/{platform}-links/ — revoke this token and drop the binding.
+
+        Chat-side logout has no service-neutral route: the row-addressed one is
+        for the browser, and this one refuses a token belonging to another
+        service so a logout cannot reach past the service that asked for it.
+        The URL is therefore *derived* from the service name — invintiry stores
+        that segment explicitly in its own registry, so a service whose segment
+        is not ``<name>-links`` would 404 here and want the mapping passed in.
 
         A 404 means nothing was linked, which is the state the caller wanted, so
         it is success rather than an error: logging out twice is not a failure.
         """
         try:
-            await self._request("DELETE", "/api/telegram-links/")
+            await self._request("DELETE", f"/api/{platform}-links/")
         except InvintiryError as exc:
             if exc.status != 404:
                 raise

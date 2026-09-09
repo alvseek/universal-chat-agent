@@ -28,7 +28,7 @@ from application.data_repositories.service_link_repository import ServiceLinkRep
 log = logging.getLogger("universal-chat-agent")
 
 HOW_TO_LINK = (
-    "Open invintiry in your browser, go to Settings → Telegram, and tap the "
+    "Open invintiry in your browser, go to Settings → Chat Apps, and tap the "
     "link it shows you. That connects this chat to your own inventory."
 )
 
@@ -100,15 +100,21 @@ class LinkService:
     @staticmethod
     def _redeem_error(exc: InvintiryError) -> str:
         if exc.status == 400:
+            # A 400 is nearly always a stale code, but it is also how inventory
+            # refuses a chat service it does not offer or an account id
+            # malformed for one. Those two would send a person round the
+            # generate-a-fresh-code loop forever, and only this log says which
+            # of the three actually happened.
+            log.warning("redeem refused: 400 %s", exc.detail)
             return (
                 "That link code didn't work — codes are single-use and expire "
                 "after about five minutes. Generate a fresh one and try again."
             )
         if exc.status == 409:
             return (
-                "This Telegram account is already linked to a different inventory "
+                "This chat account is already linked to a different inventory "
                 "user. Send /logout there first, or disconnect it from Settings "
-                "→ Telegram."
+                "→ Chat Apps."
             )
         if exc.status == 0:
             return "I can't reach inventory right now. Try again in a moment."
@@ -128,7 +134,7 @@ class LinkService:
                 kept.append(service)
                 continue
             try:
-                await self._provider.revoke(token)
+                await self._provider.revoke(token, end_user_id)
                 revoked.append(service)
             except InvintiryError as exc:
                 # The local row still goes: leaving it would keep sending a token
@@ -143,9 +149,9 @@ class LinkService:
             return (
                 f"Disconnected from {', '.join(revoked + kept)}. "
                 f"Couldn't revoke {', '.join(kept)} upstream — disconnect it from "
-                "Settings → Telegram to be sure."
+                "Settings → Chat Apps to be sure."
             )
         return (
             f"Disconnected from {', '.join(kept)} here, but couldn't revoke upstream "
-            "— disconnect it from Settings → Telegram to be sure."
+            "— disconnect it from Settings → Chat Apps to be sure."
         )

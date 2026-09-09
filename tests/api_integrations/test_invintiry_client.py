@@ -160,13 +160,37 @@ def test_redeem_link_posts_the_contract_body_with_the_brains_token():
             },
         )
 
-    result = asyncio.run(_client(handler).redeem_link("CODE1", 8932435376))
+    result = asyncio.run(_client(handler).redeem_link("CODE1", "telegram", "8932435376"))
 
     assert result["token"] == "user-token-xyz"
     assert result["workspace_slug"] == "alviandi-inventory"
-    assert seen["url"].endswith("/api/telegram-links/redeem/")
+    # The service-neutral route, with the service carried as a field.
+    assert seen["url"].endswith("/api/chat-links/redeem/")
     assert seen["auth"] == "Bearer tok-123"  # whatever this instance was built with
-    assert seen["body"] == {"code": "CODE1", "telegram_user_id": 8932435376}
+    assert seen["body"] == {
+        "code": "CODE1",
+        "platform": "telegram",
+        "external_id": "8932435376",
+    }
+
+
+def test_redeem_link_sends_a_whatsapp_account_down_the_same_route():
+    """The point of the neutral route: a second service needs no second call."""
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"token": "t"})
+
+    asyncio.run(_client(handler).redeem_link("CODE1", "whatsapp", "6282311020200"))
+
+    assert seen["url"].endswith("/api/chat-links/redeem/")
+    assert seen["body"] == {
+        "code": "CODE1",
+        "platform": "whatsapp",
+        "external_id": "6282311020200",
+    }
 
 
 def test_redeem_link_surfaces_a_spent_code_as_400():
@@ -174,22 +198,27 @@ def test_redeem_link_surfaces_a_spent_code_as_400():
         return httpx.Response(400, json={"detail": "code expired or already used"})
 
     with pytest.raises(InvintiryError) as exc:
-        asyncio.run(_client(handler).redeem_link("STALE", 1))
+        asyncio.run(_client(handler).redeem_link("STALE", "telegram", "1"))
     assert exc.value.status == 400
     assert "expired" in exc.value.detail
 
 
-def test_redeem_link_surfaces_a_taken_telegram_id_as_409():
-    # The contract's own case: that id already belongs to a different live user.
+def test_redeem_link_surfaces_a_taken_account_as_409():
+    # The contract's own case: that account already belongs to a different live user.
     def handler(request):
         return httpx.Response(409, json={"detail": "already linked to another user"})
 
     with pytest.raises(InvintiryError) as exc:
-        asyncio.run(_client(handler).redeem_link("CODE1", 1))
+        asyncio.run(_client(handler).redeem_link("CODE1", "telegram", "1"))
     assert exc.value.status == 409
 
 
-def test_unlink_sends_delete_and_accepts_a_bodyless_204():
+@pytest.mark.parametrize(
+    "platform, expected_path",
+    [("telegram", "/api/telegram-links/"), ("whatsapp", "/api/whatsapp-links/")],
+)
+def test_unlink_addresses_the_services_own_route(platform, expected_path):
+    """Chat-side logout has no neutral route, so the segment is derived per service."""
     seen = {}
 
     def handler(request):
@@ -197,17 +226,17 @@ def test_unlink_sends_delete_and_accepts_a_bodyless_204():
         seen["url"] = str(request.url)
         return httpx.Response(204)  # no body at all
 
-    asyncio.run(_client(handler).unlink())  # must not raise on empty content
+    asyncio.run(_client(handler).unlink(platform))  # must not raise on empty content
 
     assert seen["method"] == "DELETE"
-    assert seen["url"].endswith("/api/telegram-links/")
+    assert seen["url"].endswith(expected_path)
 
 
 def test_unlink_treats_404_as_already_unlinked():
     def handler(request):
         return httpx.Response(404, json={"detail": "no link"})
 
-    asyncio.run(_client(handler).unlink())  # success: the wanted state holds
+    asyncio.run(_client(handler).unlink("telegram"))  # success: the wanted state holds
 
 
 def test_unlink_still_raises_on_a_real_failure():
@@ -216,7 +245,7 @@ def test_unlink_still_raises_on_a_real_failure():
         return httpx.Response(500, text="boom")
 
     with pytest.raises(InvintiryError) as exc:
-        asyncio.run(_client(handler).unlink())
+        asyncio.run(_client(handler).unlink("telegram"))
     assert exc.value.status == 500
 
 

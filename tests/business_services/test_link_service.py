@@ -14,7 +14,7 @@ from application.api_integrations.invintiry.link_provider import (
     InvintiryLinkProvider,
     LinkedAccount,
     UnsupportedPlatform,
-    telegram_id,
+    split_end_user_id,
 )
 from application.business_domain import link_commands as lc
 from application.business_services.link_service import LinkService
@@ -30,6 +30,7 @@ class FakeProvider:
         self._revoke_error = revoke_error
         self.redeemed: list[tuple[str, str]] = []
         self.revoked: list[str] = []
+        self.revoked_for: list[tuple[str, str]] = []
 
     async def redeem(self, code, end_user_id):
         self.redeemed.append((code, end_user_id))
@@ -37,8 +38,9 @@ class FakeProvider:
             raise self._error
         return self._account
 
-    async def revoke(self, token):
+    async def revoke(self, token, end_user_id):
         self.revoked.append(token)
+        self.revoked_for.append((token, end_user_id))
         if self._revoke_error:
             raise self._revoke_error
 
@@ -95,15 +97,28 @@ def test_a_refused_redeem_becomes_a_sentence_not_an_exception(tmp_path, status, 
     assert repo.credentials("telegram:1") == {}  # nothing stored on failure
 
 
-def test_a_non_telegram_caller_is_refused_locally(tmp_path):
+def test_a_whatsapp_caller_links_the_same_way_a_telegram_one_does(tmp_path):
+    """The regression this whole change exists for: a non-Telegram chat can link."""
+    service, repo, provider = _service(tmp_path)
+
+    reply = _run(service, lc.REDEEM, end_user_id="whatsapp:6282311020200", code="CODE1")
+
+    assert provider.redeemed == [("CODE1", "whatsapp:6282311020200")]
+    assert repo.credentials("whatsapp:6282311020200") == {"invintiry": "user-token"}
+    assert "Linked as Alvi" in reply
+
+
+def test_a_malformed_caller_id_is_refused_locally(tmp_path):
+    # Not "a service we don't support" — inventory decides that. This is an id
+    # the bridge could not have built correctly, so it never leaves the process.
     service, repo, _ = _service(
         tmp_path, FakeProvider(error=UnsupportedPlatform("nope"))
     )
 
-    reply = _run(service, lc.REDEEM, end_user_id="whatsapp:1", code="CODE1")
+    reply = _run(service, lc.REDEEM, end_user_id="nonsense", code="CODE1")
 
     assert "isn't available for this chat platform" in reply
-    assert repo.credentials("whatsapp:1") == {}
+    assert repo.credentials("nonsense") == {}
 
 
 # -- logout ------------------------------------------------------------------
@@ -215,14 +230,26 @@ def test_forget_drops_a_credential_the_service_rejected(tmp_path):
 # -- the id mapping ----------------------------------------------------------
 
 
-def test_telegram_prefix_is_stripped_for_invintiry():
-    assert telegram_id("telegram:8932435376") == 8932435376
+@pytest.mark.parametrize(
+    "end_user_id, expected",
+    [
+        ("telegram:8932435376", ("telegram", "8932435376")),
+        ("whatsapp:6282311020200", ("whatsapp", "6282311020200")),
+        # A service this module has never heard of still splits: inventory owns
+        # the registry, so refusing here would be guessing on its behalf.
+        ("signal:abc", ("signal", "abc")),
+        # First colon only — an account id may contain one, a service never does.
+        ("matrix:@alvi:example.org", ("matrix", "@alvi:example.org")),
+    ],
+)
+def test_an_end_user_id_splits_into_service_and_account(end_user_id, expected):
+    assert split_end_user_id(end_user_id) == expected
 
 
-@pytest.mark.parametrize("bad", ["whatsapp:123", "8932435376", "telegram:abc", ""])
-def test_ids_invintiry_cannot_accept_are_refused_here(bad):
+@pytest.mark.parametrize("bad", ["8932435376", "telegram:", ":123", "", ":"])
+def test_ids_that_name_no_service_or_no_account_are_refused(bad):
     with pytest.raises(UnsupportedPlatform):
-        telegram_id(bad)
+        split_end_user_id(bad)
 
 
 def test_provider_redeem_uses_the_brain_token_and_stores_nothing_itself():
@@ -232,8 +259,8 @@ def test_provider_redeem_uses_the_brain_token_and_stores_nothing_itself():
         def __init__(self, token):
             used.append(token)
 
-        async def redeem_link(self, code, tg_id):
-            assert (code, tg_id) == ("CODE1", 42)
+        async def redeem_link(self, code, platform, external_id):
+            assert (code, platform, external_id) == ("CODE1", "telegram", "42")
             return {
                 "token": "user-token",
                 "user_display_name": "Alvi",
@@ -255,7 +282,7 @@ def test_a_success_carrying_no_token_becomes_a_link_failure():
         def __init__(self, token):
             pass
 
-        async def redeem_link(self, code, tg_id):
+        async def redeem_link(self, code, platform, external_id):
             return {"user_display_name": "Alvi"}  # no token
 
     provider = InvintiryLinkProvider(Client, "BRAIN-TOKEN")
@@ -263,17 +290,19 @@ def test_a_success_carrying_no_token_becomes_a_link_failure():
         asyncio.run(provider.redeem("CODE1", "telegram:42"))
 
 
-def test_provider_revoke_uses_the_token_being_revoked():
+def test_provider_revoke_uses_the_token_being_revoked_and_names_its_service():
     used: list[str] = []
+    unlinked: list[str] = []
 
     class Client:
         def __init__(self, token):
             used.append(token)
 
-        async def unlink(self):
-            return None
+        async def unlink(self, platform):
+            unlinked.append(platform)
 
     provider = InvintiryLinkProvider(Client, "BRAIN-TOKEN")
-    asyncio.run(provider.revoke("USER-TOKEN"))
+    asyncio.run(provider.revoke("USER-TOKEN", "whatsapp:6282311020200"))
 
     assert used == ["USER-TOKEN"]  # not the brain's
+    assert unlinked == ["whatsapp"]  # a logout must not reach past its own service

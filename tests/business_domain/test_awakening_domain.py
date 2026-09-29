@@ -8,7 +8,7 @@ import pytest
 
 from application.business_domain import awakening_domain as ad
 
-# The shape Munnin's /api/awaken returns: whole records carry ``content``, index
+# The shape a memory service returns: whole records carry ``content``, index
 # entries carry title/tags/dates only, single-record layers may be None.
 PAYLOAD = {
     "agent_id": "op",

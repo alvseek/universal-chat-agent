@@ -7,7 +7,7 @@ process fails fast at startup if configuration is missing.
 With a memory service configured, the brain can also *become* any agent that
 service holds: a request naming ``agent_id`` is answered by an ``Agent`` built from
 that agent's awakening. The pieces are wired here and nowhere else — token
-provider (Authentra) -> Munnin client -> awakening domain (payload -> prompt)
+provider (OIDC) -> memory-service client -> awakening domain (payload -> prompt)
 -> agent registry (prompt -> warm ``Agent``) -> chat service.
 """
 from __future__ import annotations
@@ -19,13 +19,16 @@ import httpx
 from fastapi import FastAPI
 
 from application.api_controllers.chat_controller import router
-from application.api_integrations.authentra.token_provider import (
+from application.api_integrations.llm.llm_client import build_agent
+from application.api_integrations.memory_service.memory_service_client import (
+    MemoryServiceClient,
+    MemoryServiceError,
+)
+from application.api_integrations.oidc.token_provider import (
     ClientCredentials,
     ClientCredentialsTokenProvider,
     TokenError,
 )
-from application.api_integrations.munnin.munnin_client import MunninClient, MunninError
-from application.api_integrations.openrouter.llm_client import build_agent
 from application.business_domain import awakening_domain
 from application.business_domain.awakening_domain import AgentNotFound
 from application.business_domain.link_provider import LinkProvider
@@ -122,10 +125,10 @@ def build_registry(
         ),
         http,
     )
-    munnin = MunninClient(memory.url, token_provider, http)
+    memory_client = MemoryServiceClient(memory.url, token_provider, http)
 
     async def load_prompt(agent_id: str) -> str:
-        payload = await munnin.awaken(agent_id)
+        payload = await memory_client.awaken(agent_id)
         prompt = awakening_domain.assemble_system_prompt(
             payload, layers=memory.layers, exclude=memory.exclude
         )
@@ -133,9 +136,9 @@ def build_registry(
 
     def make_agent(agent_id: str, prompt: str):
         return build_agent(
-            config.openrouter_model,
-            config.openrouter_base_url,
-            config.openrouter_api_key,
+            config.llm_model,
+            config.llm_base_url,
+            config.llm_api_key,
             prompt,
             toolsets=bindings.get(agent_id) or None,
         )
@@ -150,9 +153,9 @@ def create_app() -> FastAPI:
 
     repository = MessageRepository(config.db_path)
     default_agent = build_agent(
-        model=config.openrouter_model,
-        base_url=config.openrouter_base_url,
-        api_key=config.openrouter_api_key,
+        model=config.llm_model,
+        base_url=config.llm_base_url,
+        api_key=config.llm_api_key,
         system_prompt=config.system_prompt,
     )
     bindings = build_bindings(config)
@@ -162,7 +165,7 @@ def create_app() -> FastAPI:
         registry, http = build_registry(config, config.memory_service, bindings)
     elif bindings:
         raise ValueError(
-            "AGENT_TOOLSETS is set but no memory service is configured (MUNNIN_URL) — "
+            "AGENT_TOOLSETS is set but no memory service is configured (MEMORY_SERVICE_URL) — "
             "toolsets bind to agents the memory service holds"
         )
     pending = PendingApprovalRepository(config.db_path) if bindings else None
@@ -190,14 +193,14 @@ def create_app() -> FastAPI:
     app.state.agent_registry = registry
     app.include_router(router)
     app.add_exception_handler(AgentNotFound, handle_not_found)
-    app.add_exception_handler(MunninError, handle_upstream)
+    app.add_exception_handler(MemoryServiceError, handle_upstream)
     app.add_exception_handler(TokenError, handle_upstream)
     app.add_exception_handler(ValueError, handle_value_error)
     app.add_exception_handler(Exception, handle_unexpected)
 
     log.info(
         "brain ready (model=%s, memory service=%s, toolsets=%s) — serving /chat",
-        config.openrouter_model,
+        config.llm_model,
         config.memory_service.url if config.memory_service else "none",
         ", ".join(f"{a}={t}" for a, t in config.agent_toolsets) or "none",
     )

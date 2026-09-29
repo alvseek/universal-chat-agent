@@ -8,10 +8,10 @@ Two groups of settings:
 
 * the brain itself — model, memory window, the default ``SYSTEM_PROMPT`` used
   when a request names no agent;
-* the memory service — present only when ``MUNNIN_URL`` is set. With it, requests
-  may name an ``agent_id`` and the brain awakens that agent from Munnin using a
-  machine credential from Authentra. Without it, the brain is the single default
-  agent it always was.
+* the memory service — present only when ``MEMORY_SERVICE_URL`` is set. With it,
+  requests may name an ``agent_id`` and the brain awakens that agent from the
+  service using a machine credential from the OIDC issuer. Without it, the brain is
+  the single default agent it always was.
 """
 from __future__ import annotations
 
@@ -29,9 +29,9 @@ DEFAULT_AGENT_CACHE_TTL_SECONDS = 8 * 60 * 60
 
 @dataclass(frozen=True)
 class MemoryServiceConfig:
-    """How to reach Munnin and the credential that identifies this brain to it."""
+    """How to reach the memory service and the credential that identifies this brain to it."""
 
-    url: str  # e.g. https://munnin.lok.quest
+    url: str  # e.g. https://memory.example
     resource: str  # the API resource indicator tokens are bound to
     client_id: str
     client_secret: str
@@ -45,9 +45,9 @@ class MemoryServiceConfig:
 
 @dataclass(frozen=True)
 class Config:
-    openrouter_api_key: str
-    openrouter_model: str
-    openrouter_base_url: str
+    llm_api_key: str
+    llm_model: str
+    llm_base_url: str
     memory_window: int
     db_path: str
     system_prompt: str
@@ -88,17 +88,17 @@ def _csv(name: str) -> tuple[str, ...]:
 
 
 def _memory_service() -> MemoryServiceConfig | None:
-    url = os.getenv("MUNNIN_URL", "").strip().rstrip("/")
+    url = os.getenv("MEMORY_SERVICE_URL", "").strip().rstrip("/")
     if not url:
         return None
     layers = _csv("AWAKENING_LAYERS")
     return MemoryServiceConfig(
         url=url,
-        resource=os.getenv("MUNNIN_RESOURCE", "").strip() or f"{url}/mcp",
-        client_id=_require("MUNNIN_M2M_CLIENT_ID"),
-        client_secret=_require("MUNNIN_M2M_CLIENT_SECRET"),
-        scope=os.getenv("MUNNIN_M2M_SCOPE", "").strip(),
-        issuer=_require("AUTHENTRA_ISSUER").rstrip("/"),
+        resource=os.getenv("MEMORY_SERVICE_RESOURCE", "").strip() or f"{url}/mcp",
+        client_id=_require("MEMORY_SERVICE_CLIENT_ID"),
+        client_secret=_require("MEMORY_SERVICE_CLIENT_SECRET"),
+        scope=os.getenv("MEMORY_SERVICE_SCOPE", "").strip(),
+        issuer=_require("OIDC_ISSUER").rstrip("/"),
         cache_ttl_seconds=_int("AGENT_CACHE_TTL_SECONDS", DEFAULT_AGENT_CACHE_TTL_SECONDS),
         layers=layers or None,
         exclude=_csv("AWAKENING_EXCLUDE"),
@@ -139,9 +139,9 @@ def _sources(name: str) -> tuple[tuple[str, str], ...]:
 def load_config() -> Config:
     """Load settings from the environment (.env already applied)."""
     return Config(
-        openrouter_api_key=_require("OPENROUTER_API_KEY"),
-        openrouter_model=_require("OPENROUTER_MODEL"),
-        openrouter_base_url=os.getenv("OPENROUTER_BASE_URL", DEFAULT_BASE_URL).strip()
+        llm_api_key=_require("LLM_API_KEY"),
+        llm_model=_require("LLM_MODEL"),
+        llm_base_url=os.getenv("LLM_BASE_URL", DEFAULT_BASE_URL).strip()
         or DEFAULT_BASE_URL,
         memory_window=_int("MEMORY_WINDOW", 15),
         db_path=os.getenv("DB_PATH", "agent.db").strip() or "agent.db",

@@ -11,7 +11,7 @@ import json
 import httpx
 import pytest
 
-from application.api_integrations.authentra.token_provider import (
+from application.api_integrations.oidc.token_provider import (
     ClientCredentials,
     ClientCredentialsTokenProvider,
     TokenError,
@@ -21,7 +21,7 @@ CREDS = ClientCredentials(
     issuer="https://auth.example/oidc",
     client_id="app-1",
     client_secret="s3cret",
-    resource="https://munnin.example/mcp",
+    resource="https://memory.example/mcp",
     scope="memory:read",
 )
 
@@ -64,7 +64,7 @@ def test_exchange_sends_grant_resource_scope_and_basic_auth():
     assert req.url == "https://auth.example/oidc/token"
     form = dict(pair.split("=") for pair in req.content.decode().split("&"))
     assert form["grant_type"] == "client_credentials"
-    assert form["resource"] == "https%3A%2F%2Fmunnin.example%2Fmcp"
+    assert form["resource"] == "https%3A%2F%2Fmemory.example%2Fmcp"
     assert form["scope"] == "memory%3Aread"
     expected = base64.b64encode(b"app-1:s3cret").decode()
     assert req.headers["authorization"] == f"Basic {expected}"

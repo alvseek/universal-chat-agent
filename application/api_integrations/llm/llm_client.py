@@ -1,4 +1,4 @@
-"""External integration: the LLM provider (OpenRouter, OpenAI-compatible).
+"""External integration: the LLM provider (an OpenAI-compatible endpoint; OpenRouter by default).
 
 This is the ONLY module that knows about the model / pydantic-ai. Swapping the
 brain's model or provider, or adding tools later, happens here without touching
@@ -46,7 +46,7 @@ def build_agent(
     system_prompt: str,
     toolsets: Sequence[AbstractToolset] | None = None,
 ) -> Agent:
-    """Construct an Agent bound to an OpenAI-compatible endpoint (OpenRouter).
+    """Construct an Agent bound to an OpenAI-compatible endpoint.
 
     With toolsets, the output type widens to include ``DeferredToolRequests`` so
     a write tool's approval requirement pauses the run instead of failing it; a

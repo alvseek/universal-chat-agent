@@ -44,7 +44,7 @@ business_services/chat_service
    ├─ business_domain/conversation_domain    (pure: validate id, window history)
    ├─ data_repositories/message_repository    (SQLite: recent + append)
    │      └─ data_entities/message_entity      (schema + Message)
-   └─ api_integrations/openrouter/llm_client   (pydantic-ai → OpenRouter)
+   └─ api_integrations/llm/llm_client   (pydantic-ai → OpenAI-compatible)
 ```
 
 Memory is isolated per `conversation_id`, so every bridge/user is independent and survives
@@ -54,7 +54,7 @@ restarts (SQLite file).
 
 - **Runtime**: Python 3.12+
 - **Web**: FastAPI + uvicorn (async, matches the async agent)
-- **Model**: pydantic-ai over an OpenRouter (OpenAI-compatible) model
+- **Model**: pydantic-ai over any OpenAI-compatible model (OpenRouter by default)
 - **Database**: SQLite (conversation memory)
 
 ---
@@ -64,7 +64,7 @@ restarts (SQLite file).
 ### Prerequisites
 
 - Python 3.12+ (`python --version`)
-- An OpenRouter API key ([openrouter.ai/keys](https://openrouter.ai/keys))
+- An API key for an OpenAI-compatible endpoint ([openrouter.ai/keys](https://openrouter.ai/keys) for the default)
 
 ### Setup
 
@@ -79,7 +79,7 @@ restarts (SQLite file).
 2. Configure environment:
    ```sh
    cp .env.example .env
-   # Fill OPENROUTER_API_KEY (and the model, if you like)
+   # Fill LLM_API_KEY (and the model, if you like)
    ```
 
 3. Start:
@@ -98,23 +98,23 @@ restarts (SQLite file).
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `OPENROUTER_API_KEY` | OpenRouter API key (required) | `sk-or-...` |
-| `OPENROUTER_MODEL` | Model id on OpenRouter (required) | `deepseek/deepseek-chat` |
-| `OPENROUTER_BASE_URL` | OpenAI-compatible endpoint | `https://openrouter.ai/api/v1` |
+| `LLM_API_KEY` | API key for the model endpoint (required) | `sk-...` |
+| `LLM_MODEL` | Model id at that endpoint (required) | `deepseek/deepseek-chat` |
+| `LLM_BASE_URL` | Any OpenAI-compatible endpoint (OpenRouter by default) | `https://openrouter.ai/api/v1` |
 | `MEMORY_WINDOW` | Recent turns remembered per conversation | `15` |
 | `DB_PATH` | SQLite memory file | `agent.db` |
 | `SYSTEM_PROMPT` | The default agent's persona (used when a request names no `agent_id`) | `You are a helpful...` |
 | `HOST` / `PORT` | Where the server listens | `0.0.0.0` / `8000` |
 
-**Memory service (optional)** — set `MUNNIN_URL` and the brain can *become* any agent that service holds (see [Agents from a memory service](#agents-from-a-memory-service)):
+**Memory service (optional)** — set `MEMORY_SERVICE_URL` and the brain can *become* any agent that service holds (see [Agents from a memory service](#agents-from-a-memory-service)):
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `MUNNIN_URL` | The memory service; empty = single default agent | `https://munnin.example` |
-| `MUNNIN_RESOURCE` | API resource the token is bound to (default `<MUNNIN_URL>/mcp`) | `https://munnin.example/mcp` |
-| `MUNNIN_M2M_CLIENT_ID` / `MUNNIN_M2M_CLIENT_SECRET` | This brain's machine credential at the identity provider | — |
-| `MUNNIN_M2M_SCOPE` | Scope requested with the token (optional) | `memory:read` |
-| `AUTHENTRA_ISSUER` | OIDC issuer; token endpoint is `<issuer>/token` | `https://auth.example/oidc` |
+| `MEMORY_SERVICE_URL` | The memory service; empty = single default agent | `https://memory.example` |
+| `MEMORY_SERVICE_RESOURCE` | API resource the token is bound to (default `<MEMORY_SERVICE_URL>/mcp`) | `https://memory.example/mcp` |
+| `MEMORY_SERVICE_CLIENT_ID` / `MEMORY_SERVICE_CLIENT_SECRET` | This brain's machine credential at the identity provider | — |
+| `MEMORY_SERVICE_SCOPE` | Scope requested with the token (optional) | `memory:read` |
+| `OIDC_ISSUER` | OIDC issuer; token endpoint is `<issuer>/token` | `https://auth.example/oidc` |
 | `AGENT_CACHE_TTL_SECONDS` | How long a built agent stays warm | `28800` |
 | `AWAKENING_LAYERS` / `AWAKENING_EXCLUDE` | Which awakening layers become the prompt (empty = all, canonical order) | `identity,shared.reasoning` |
 
@@ -175,20 +175,20 @@ Errors are always `{"error": "<message>"}` with the status code carrying the kin
 2. **Orchestrate** (`application/business_services/chat_service.py`)
    - Validate + normalize the `conversation_id` (`business_domain`), load the recent window
      from the repository, run the LLM, persist the user + assistant turns.
-3. **Generate** (`application/api_integrations/openrouter/llm_client.py`)
+3. **Generate** (`application/api_integrations/llm/llm_client.py`)
    - pydantic-ai runs the model over the message + history, returns the reply text.
 
 ### Agents from a memory service
 
-With `MUNNIN_URL` set the brain is a runtime for agents that live as **data** in a memory
+With `MEMORY_SERVICE_URL` set the brain is a runtime for agents that live as **data** in a memory
 service, not as code here. A request naming `agent_id` goes through:
 
 1. **Registry** (`business_services/agent_registry.py`) — is that agent warm? If so, use it.
    Otherwise load it (one load per agent even under concurrent requests), keep it for
    `AGENT_CACHE_TTL_SECONDS`, then refresh. A refresh that fails keeps serving the cached
    copy with a warning; an agent the service no longer holds is dropped and answered 404.
-2. **Awaken** (`api_integrations/munnin/munnin_client.py`) — `GET /api/awaken?agent_id=…`
-   with a bearer from `api_integrations/authentra/token_provider.py` (OAuth
+2. **Awaken** (`api_integrations/memory_service/memory_service_client.py`) — `GET /api/awaken?agent_id=…`
+   with a bearer from `api_integrations/oidc/token_provider.py` (OAuth
    `client_credentials`, cached until shortly before expiry).
 3. **Render** (`business_domain/awakening_domain.py`) — the payload's layers become the
    system prompt **by shape, never by name**: every layer the service sends is rendered
@@ -238,9 +238,9 @@ messages(id, conversation_id, role, content, ts)
 
 | Service | Purpose | Protocol | Timeout |
 |---------|---------|----------|---------|
-| OpenRouter | The LLM (OpenAI-compatible) | HTTPS | provider default |
-| Memory service (optional, `MUNNIN_URL`) | An agent's awakening, by `agent_id` | HTTPS, bearer | 30 s |
-| Identity provider (optional, `AUTHENTRA_ISSUER`) | The machine credential for the memory service | HTTPS, `client_credentials` | 30 s |
+| OpenAI-compatible endpoint | The LLM (OpenRouter by default) | HTTPS | provider default |
+| Memory service (optional, `MEMORY_SERVICE_URL`) | An agent's awakening, by `agent_id` | HTTPS, bearer | 30 s |
+| Identity provider (optional, `OIDC_ISSUER`) | The machine credential for the memory service | HTTPS, `client_credentials` | 30 s |
 
 ---
 

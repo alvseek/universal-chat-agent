@@ -23,7 +23,7 @@ import string
 
 from pydantic_ai import Agent
 
-from application.api_integrations.openrouter import llm_client
+from application.api_integrations.llm import llm_client
 from application.business_domain import conversation_domain as domain
 from application.business_domain import link_commands
 from application.business_services.agent_registry import AgentRegistry
@@ -81,7 +81,7 @@ class ChatService:
             return self._agent
         if self._registry is None:
             raise RegistryUnavailable(
-                "this brain has no memory service configured (MUNNIN_URL), "
+                "this brain has no memory service configured (MEMORY_SERVICE_URL), "
                 "so it cannot serve a named agent"
             )
         return await self._registry.get(agent_id)

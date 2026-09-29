@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from application.api_controllers.chat_controller import router
-from application.api_integrations.munnin.munnin_client import MunninError
+from application.api_integrations.memory_service.memory_service_client import MemoryServiceError
 from application.business_domain.awakening_domain import AgentNotFound
 from application.middleware.error_handler import (
     handle_not_found,
@@ -28,7 +28,7 @@ class _StubService:
         if self.raise_not_found:
             raise AgentNotFound(agent_id)
         if self.raise_upstream:
-            raise MunninError("munnin answered 503: down")
+            raise MemoryServiceError("memory service answered 503: down")
         return f"echo:{message}:{agent_id}"
 
 
@@ -46,7 +46,7 @@ def _client(service, registry):
     app.state.agent_registry = registry
     app.include_router(router)
     app.add_exception_handler(AgentNotFound, handle_not_found)
-    app.add_exception_handler(MunninError, handle_upstream)
+    app.add_exception_handler(MemoryServiceError, handle_upstream)
     app.add_exception_handler(ValueError, handle_value_error)
     return TestClient(app, raise_server_exceptions=False)
 
@@ -103,4 +103,4 @@ def test_reload_drives_registry():
 def test_reload_without_registry_is_400():
     resp = _client(_StubService(), None).post("/agents/op/reload")
     assert resp.status_code == 400
-    assert "MUNNIN_URL" in resp.json()["error"]
+    assert "MEMORY_SERVICE_URL" in resp.json()["error"]

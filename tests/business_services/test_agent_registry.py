@@ -76,7 +76,7 @@ def test_transient_refresh_failure_serves_stale_and_backs_off():
 
     stale = asyncio.run(reg.get("op"))
     clock["t"] = 150.0
-    loader.fail_with = RuntimeError("munnin down")
+    loader.fail_with = RuntimeError("memory service down")
     served = asyncio.run(reg.get("op"))
     clock["t"] = 160.0  # inside the retry window: no new attempt
     served_again = asyncio.run(reg.get("op"))
@@ -89,7 +89,7 @@ def test_transient_refresh_failure_serves_stale_and_backs_off():
 
 def test_first_load_failure_propagates():
     loader, clock = _Loader(), {"t": 0.0}
-    loader.fail_with = RuntimeError("munnin down")
+    loader.fail_with = RuntimeError("memory service down")
     reg = _registry(loader, clock)
 
     with pytest.raises(RuntimeError):

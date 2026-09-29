@@ -9,7 +9,7 @@ DEMO = ("demo", "tests.support.demo_toolset:build_demo_toolsets")
 
 def _config(agent_toolsets, toolset_sources=()):
     return Config(
-        openrouter_api_key="k", openrouter_model="m", openrouter_base_url="b",
+        llm_api_key="k", llm_model="m", llm_base_url="b",
         memory_window=15, db_path=":memory:", system_prompt="p",
         host="127.0.0.1", port=8000, memory_service=None,
         agent_toolsets=agent_toolsets, toolset_sources=toolset_sources,

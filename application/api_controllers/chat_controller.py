@@ -34,6 +34,6 @@ async def reload_agent(agent_id: str, request: Request) -> dict:
     """Rebuild one agent from the memory service now, ahead of its cache TTL."""
     registry = getattr(request.app.state, "agent_registry", None)
     if registry is None:
-        raise RegistryUnavailable("this brain has no memory service configured (MUNNIN_URL)")
+        raise RegistryUnavailable("this brain has no memory service configured (MEMORY_SERVICE_URL)")
     await registry.reload(agent_id)
     return {"agent_id": agent_id, "reloaded": True}

@@ -141,6 +141,9 @@ def build_registry(
             config.llm_api_key,
             prompt,
             toolsets=bindings.get(agent_id) or None,
+            # Each agent pins its own sticky-routing key, so one agent's traffic
+            # cannot drag another's cache onto a different upstream provider.
+            session_id=agent_id,
         )
 
     registry = AgentRegistry(load_prompt, make_agent, ttl_seconds=memory.cache_ttl_seconds)
@@ -157,6 +160,7 @@ def create_app() -> FastAPI:
         base_url=config.llm_base_url,
         api_key=config.llm_api_key,
         system_prompt=config.system_prompt,
+        session_id="default",
     )
     bindings = build_bindings(config)
     registry: AgentRegistry | None = None

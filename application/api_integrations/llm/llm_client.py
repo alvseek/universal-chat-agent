@@ -6,6 +6,7 @@ services, controllers, or the data layer.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
@@ -20,10 +21,13 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolDenied
 from pydantic_ai.toolsets.abstract import AbstractToolset
 
 from application.business_services.chat_deps import ChatDeps
+
+log = logging.getLogger("universal-chat-agent")
 
 Turn = Tuple[str, str]  # (role, content)
 
@@ -45,15 +49,28 @@ def build_agent(
     api_key: str,
     system_prompt: str,
     toolsets: Sequence[AbstractToolset] | None = None,
+    session_id: str | None = None,
 ) -> Agent:
     """Construct an Agent bound to an OpenAI-compatible endpoint.
 
     With toolsets, the output type widens to include ``DeferredToolRequests`` so
     a write tool's approval requirement pauses the run instead of failing it; a
     tool-less agent keeps the plain string contract it always had.
+
+    ``session_id`` rides as OpenRouter's sticky-routing key, pinning this agent's
+    requests to one upstream provider so a cached prompt prefix stays reachable.
+    Left unset, OpenRouter derives the key from the first system message and the
+    first non-system message — and this brain's memory window slides, so that
+    derived key moves and the cache is left behind. Providers that ignore the
+    field are unaffected by it.
     """
     provider = OpenAIProvider(base_url=base_url, api_key=api_key)
     llm = OpenAIChatModel(model, provider=provider)
+    pinned: dict = (
+        {"model_settings": ModelSettings(extra_body={"session_id": session_id})}
+        if session_id
+        else {}
+    )
     if toolsets:
         return Agent(
             llm,
@@ -64,8 +81,9 @@ def build_agent(
             # this bot, and each run supplies who is talking.
             deps_type=ChatDeps,
             output_type=[str, DeferredToolRequests],
+            **pinned,
         )
-    return Agent(llm, system_prompt=system_prompt)
+    return Agent(llm, system_prompt=system_prompt, **pinned)
 
 
 def _summarize(requests: DeferredToolRequests) -> str:
@@ -77,7 +95,29 @@ def _summarize(requests: DeferredToolRequests) -> str:
     return "; ".join(lines)
 
 
+def _log_usage(result) -> None:
+    """One line per model run: tokens spent, and how much came from the cache.
+
+    Cache reads decide whether this model choice is affordable, and nothing else
+    records them — the transport logs an HTTP status, which says nothing about it.
+    """
+    usage = getattr(result, "usage", None)
+    if usage is None:
+        return
+    details = getattr(usage, "details", None)
+    reasoning = details.get("reasoning_tokens", 0) if isinstance(details, dict) else 0
+    log.info(
+        "llm turn: in=%d out=%d cache_read=%d cache_write=%d reasoning=%d",
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+        reasoning,
+    )
+
+
 def _outcome(result) -> str | PendingRun:
+    _log_usage(result)
     output = result.output
     if isinstance(output, DeferredToolRequests):
         return PendingRun(

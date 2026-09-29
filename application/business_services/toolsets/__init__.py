@@ -1,10 +1,11 @@
 """The named toolsets this brain can bind to an agent.
 
-Code owns the mechanism (what a toolset named ``invintiry`` does); configuration
-owns both the selection (``AGENT_TOOLSETS=invintiry-operator=invintiry``) and
-where each name's builder comes from
-(``TOOLSET_SOURCES=invintiry=my_pkg.toolsets:build``). An agent with no binding
-gets no tools — and its prompt says so.
+Code owns the mechanism (what a toolset does); configuration owns both the
+selection (``AGENT_TOOLSETS=some-agent=some-toolset``) and where each name's
+builder comes from (``TOOLSET_SOURCES=some-toolset=my_pkg.toolsets:build``).
+
+The brain ships no toolset of its own. An agent with no binding gets no tools —
+and its prompt says so.
 """
 from __future__ import annotations
 
@@ -14,23 +15,19 @@ from pydantic_ai.toolsets.abstract import AbstractToolset
 
 from application.common.loading import import_callable
 
-from .invintiry import build_invintiry_toolsets
-
 Builder = Callable[[Mapping[str, Any]], list[AbstractToolset]]
-
-# Builders bundled with the brain itself. A generic deployment ships none and
-# names every source in TOOLSET_SOURCES instead.
-_BUNDLED: dict[str, Builder] = {
-    "invintiry": build_invintiry_toolsets,
-}
 
 
 def load_builders(specs: Sequence[tuple[str, str]]) -> dict[str, Builder]:
-    """Resolve ``alias=module:attribute`` specs into builders, over the bundled set."""
-    builders: dict[str, Builder] = dict(_BUNDLED)
-    for name, target in specs:
-        builders[name] = import_callable(target, what=f"toolset source {name!r}")
-    return builders
+    """Resolve ``alias=module:attribute`` specs into builders.
+
+    Nothing is bundled: every name an agent is bound to has to be named here, so
+    the brain holds no integration knowledge of its own.
+    """
+    return {
+        name: import_callable(target, what=f"toolset source {name!r}")
+        for name, target in specs
+    }
 
 
 def known_toolsets(builders: Mapping[str, Builder]) -> list[str]:

@@ -24,7 +24,7 @@ PAYLOAD = {
     ],
     "reasoning": [],
     "emotional": [],
-    "knowledge_index": [{"uuid": "ki1", "title": "invintiry-tools", "tags": ["tools"], "created_date": "2026-09-01"}],
+    "knowledge_index": [{"uuid": "ki1", "title": "operator-tools", "tags": ["tools"], "created_date": "2026-09-01"}],
     "episodic_index": [],
     "latest_episode": None,
 }
@@ -42,7 +42,7 @@ def test_every_present_layer_is_rendered_and_nothing_is_dropped():
     assert "Name: Alvi" in prompt
     assert "Tools are the only truth." in prompt
     # index entries render as one line each, no body to render
-    assert "- invintiry-tools (2026-09-01; tools)" in prompt
+    assert "- operator-tools (2026-09-01; tools)" in prompt
     # empty layers produce no heading at all
     assert "## reasoning" not in prompt
     assert "## emotional" not in prompt

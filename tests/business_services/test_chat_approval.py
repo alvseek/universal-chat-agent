@@ -1,10 +1,10 @@
-"""End-to-end write-approval flow — scripted model, fake invintiry, real wiring.
+"""End-to-end write-approval flow — scripted model, real wiring.
 
-Proves the property decision 2 bought: a write tool call cannot execute in the
-turn the model makes it. The run pauses, the user gets a confirmation line, and
-only a clear "yes" in the *next* turn executes the write; anything else denies
-it. The model here is a FunctionModel that always tries to call move_item first
-— the most adversarial script for this property.
+Proves the property the gate bought: a write tool call cannot execute in the turn
+the model makes it. The run pauses, the user gets a confirmation line, and only a
+clear "yes" in the *next* turn executes the write; anything else denies it. The
+model here is a FunctionModel that always tries to call a write tool first — the
+most adversarial script for this property.
 """
 import asyncio
 
@@ -19,27 +19,20 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.tools import DeferredToolRequests
 
 from application.business_services.chat_deps import ChatDeps
-
 from application.business_services.chat_service import ChatService
 from application.business_services.link_service import LinkService
-from application.business_services.toolsets.invintiry import build_invintiry_toolsets
 from application.data_repositories.message_repository import MessageRepository
 from application.data_repositories.pending_approval_repository import (
     PendingApprovalRepository,
 )
 from application.data_repositories.service_link_repository import ServiceLinkRepository
+from tests.support import demo_toolset as demo
 
-from .test_invintiry_toolset import FakeClient
-
-
-MOVE_CALL = (
-    "move_item",
-    {"item": "EL-001", "from_location": "Rak B", "to_location": "Rak A", "quantity": 3},
-)
-CREATE_LOCATION_CALL = ("create_location", {"name": "Rak C", "category": "Gudang"})
+STORE_CALL = ("store", {"name": "Rak C"})
+DISCARD_CALL = ("discard", {"name": "Rak D"})
 
 
-def _scripted_model(call=MOVE_CALL):
+def _scripted_model(call=STORE_CALL):
     """Calls the given write tool on first contact; answers with its result after."""
     tool_name, args = call
 
@@ -80,7 +73,7 @@ class _LinkedCaller:
 class _StubProvider:
     """Enough of a link provider for tests that never redeem or revoke."""
 
-    account_label = "inventory"
+    account_label = "account"
     how_to_link = "Tap the link in your account settings."
 
     async def redeem(self, code, end_user_id):  # pragma: no cover - unused here
@@ -90,15 +83,12 @@ class _StubProvider:
         return None
 
 
-def _service(tmp_path, call=MOVE_CALL, linked=True):
-    client = FakeClient()
-    toolsets = build_invintiry_toolsets(
-        {"invintiry_make_client": lambda _token: client}
-    )
+def _service(tmp_path, call=STORE_CALL, linked=True):
+    demo.reset()
     agent = Agent(
         _scripted_model(call),
         system_prompt="operator",
-        toolsets=toolsets,
+        toolsets=demo.build_demo_toolsets({}),
         deps_type=ChatDeps,
         output_type=[str, DeferredToolRequests],
     )
@@ -106,71 +96,70 @@ def _service(tmp_path, call=MOVE_CALL, linked=True):
     pending = PendingApprovalRepository(str(tmp_path / "chat.db"))
     links = ServiceLinkRepository(str(tmp_path / "chat.db"))
     if linked:
-        links.put("invintiry", CALLER, "user-token")
+        links.put(demo.SERVICE, CALLER, "user-token")
     service = ChatService(
-        agent, repo, 15, None, pending, LinkService(links, {"invintiry": _StubProvider()})
+        agent, repo, 15, None, pending,
+        LinkService(links, {demo.SERVICE: _StubProvider()}),
     )
-    return _LinkedCaller(service), client, pending
+    return _LinkedCaller(service), pending
 
 
 def test_write_pauses_then_yes_executes(tmp_path):
-    service, client, pending = _service(tmp_path)
+    service, pending = _service(tmp_path)
 
-    reply1 = asyncio.run(service.handle("c1", "move 3 kabel to rak a"))
-    assert "confirm" in reply1.lower() and "move_item" in reply1
-    assert client.transfers == []  # nothing executed yet
+    reply1 = asyncio.run(service.handle("c1", "store Rak C"))
+    assert "confirm" in reply1.lower() and "store" in reply1
+    assert demo.stored == []  # nothing executed yet
     assert pending.get("c1") is not None
 
     reply2 = asyncio.run(service.handle("c1", "yes"))
-    assert client.transfers == [(1, 10, 11, 3)]
+    assert demo.calls == [("user-token", "store")]
+    assert demo.stored == ["Rak C"]
     assert pending.get("c1") is None
     assert "result:" in reply2
 
 
 def test_anything_but_yes_denies(tmp_path):
-    service, client, pending = _service(tmp_path)
+    service, pending = _service(tmp_path)
 
-    asyncio.run(service.handle("c2", "move 3 kabel to rak a"))
+    asyncio.run(service.handle("c2", "store Rak C"))
     reply = asyncio.run(service.handle("c2", "hmm actually wait"))
-    assert client.transfers == []
+    assert demo.stored == []
     assert pending.get("c2") is None
     assert "did not confirm" in reply.lower()
 
 
-def test_creating_a_location_pauses_the_same_way(tmp_path):
-    """The gate is a property of the writes toolset, not of move_item — a newly
+def test_a_second_write_pauses_the_same_way(tmp_path):
+    """The gate is a property of the writes toolset, not of one tool — a newly
     added write inherits it, and the confirmation line names the real call."""
-    service, client, pending = _service(tmp_path, call=CREATE_LOCATION_CALL)
-    before = len(client.locations)
+    service, pending = _service(tmp_path, call=DISCARD_CALL)
 
-    reply1 = asyncio.run(service.handle("c5", "add a shelf called Rak C"))
-    assert "confirm" in reply1.lower() and "create_location" in reply1
-    assert "Rak C" in reply1
-    assert len(client.locations) == before  # nothing created yet
+    reply1 = asyncio.run(service.handle("c5", "discard Rak D"))
+    assert "confirm" in reply1.lower() and "discard" in reply1
+    assert demo.calls == []  # nothing ran yet
 
     reply2 = asyncio.run(service.handle("c5", "yes"))
-    assert [l["name"] for l in client.locations][-1] == "Rak C"
+    assert demo.calls == [("user-token", "discard")]
     assert pending.get("c5") is None
     assert "result:" in reply2
 
 
-def test_creating_a_location_denied_leaves_nothing_behind(tmp_path):
-    service, client, pending = _service(tmp_path, call=CREATE_LOCATION_CALL)
-    before = len(client.locations)
+def test_a_denied_second_write_leaves_nothing_behind(tmp_path):
+    service, pending = _service(tmp_path, call=DISCARD_CALL)
 
-    asyncio.run(service.handle("c6", "add a shelf called Rak C"))
+    asyncio.run(service.handle("c6", "discard Rak D"))
     reply = asyncio.run(service.handle("c6", "no wait"))
-    assert len(client.locations) == before
+    assert demo.calls == []
     assert pending.get("c6") is None
     assert "did not confirm" in reply.lower()
 
 
 def test_pending_is_per_conversation(tmp_path):
-    service, client, pending = _service(tmp_path)
+    service, pending = _service(tmp_path)
 
-    asyncio.run(service.handle("c3", "move 3 kabel"))
+    asyncio.run(service.handle("c3", "store Rak C"))
     # A different conversation is untouched by c3's pending write.
     assert pending.get("c4") is None
     reply = asyncio.run(service.handle("c3", "ya"))
-    assert client.transfers == [(1, 10, 11, 3)]
+    assert demo.stored == ["Rak C"]
     assert "result:" in reply

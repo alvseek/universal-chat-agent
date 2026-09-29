@@ -44,21 +44,6 @@ class MemoryServiceConfig:
 
 
 @dataclass(frozen=True)
-class InvintiryConfig:
-    """How to reach the Invintiry inventory API, and as whom.
-
-    ``brain_token`` is the *brain's own* credential and is used for exactly one
-    call: redeeming a link code, which happens before the person has any token
-    of their own. It is deliberately not workspace-scoped, so one credential
-    serves whichever workspace a code belongs to. Every other call runs on the
-    caller's token, which lives in the link store rather than in configuration.
-    """
-
-    api_url: str  # e.g. https://api.invintiry.example
-    brain_token: str  # RS256 agent token minted once by an OWNER, for redeem only
-
-
-@dataclass(frozen=True)
 class Config:
     openrouter_api_key: str
     openrouter_model: str
@@ -72,7 +57,6 @@ class Config:
     # Which named toolsets each agent is bound to (AGENT_TOOLSETS). Code owns
     # what a toolset does; this mapping owns who gets it. Empty = no agent has tools.
     agent_toolsets: tuple[tuple[str, str], ...]
-    invintiry: InvintiryConfig | None
     # Where the builder for each named toolset comes from (TOOLSET_SOURCES) and
     # where each link provider comes from (LINK_PROVIDERS), both written as
     # alias=module:attribute. Empty = only whatever the brain itself bundles.
@@ -152,13 +136,6 @@ def _sources(name: str) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
-def _invintiry() -> InvintiryConfig | None:
-    url = os.getenv("INVINTIRY_API_URL", "").strip().rstrip("/")
-    if not url:
-        return None
-    return InvintiryConfig(api_url=url, brain_token=_require("INVINTIRY_BRAIN_TOKEN"))
-
-
 def load_config() -> Config:
     """Load settings from the environment (.env already applied)."""
     return Config(
@@ -173,7 +150,6 @@ def load_config() -> Config:
         port=_int("PORT", 8000, minimum=1),
         memory_service=_memory_service(),
         agent_toolsets=_agent_toolsets(),
-        invintiry=_invintiry(),
         toolset_sources=_sources("TOOLSET_SOURCES"),
         link_providers=_sources("LINK_PROVIDERS"),
     )

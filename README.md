@@ -118,14 +118,15 @@ restarts (SQLite file).
 | `AGENT_CACHE_TTL_SECONDS` | How long a built agent stays warm | `28800` |
 | `AWAKENING_LAYERS` / `AWAKENING_EXCLUDE` | Which awakening layers become the prompt (empty = all, canonical order) | `identity,shared.reasoning` |
 
-**Toolsets (optional; needs the memory service)** — bind named toolsets to agents so an
-agent can *act*, not just answer (see [Agents from a memory service](#agents-from-a-memory-service)):
+**Toolsets and linking (optional; both need the memory service)** — bind named toolsets to
+agents so an agent can *act*, not just answer, and let a person connect their own account
+(see [Toolsets: what an agent may do](#toolsets-what-an-agent-may-do)):
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `AGENT_TOOLSETS` | Comma-separated `agent=toolset` pairs; empty = no agent has tools | `invintiry-operator=invintiry` |
-| `INVINTIRY_API_URL` | The Invintiry API the `invintiry` toolset calls | `https://api.invintiry.example` |
-| `INVINTIRY_AGENT_TOKEN` | RS256 agent token minted by the workspace OWNER (shown once at mint) | — |
+| `AGENT_TOOLSETS` | Comma-separated `agent=toolset` pairs; empty = no agent has tools | `my-agent=my-toolset` |
+| `TOOLSET_SOURCES` | Where each toolset's builder lives, as `alias=module:attribute` | `my-toolset=my_integration.toolsets:build` |
+| `LINK_PROVIDERS` | Where each link provider lives, in the same form | `my-service=my_integration.link:build_provider` |
 
 ---
 
@@ -157,8 +158,8 @@ curl -s http://localhost:8000/chat -H 'content-type: application/json' \
 
 # with a memory service configured: answer as a named agent
 curl -s http://localhost:8000/chat -H 'content-type: application/json' \
-  -d '{"conversation_id":"cli:me","message":"who are you?","agent_id":"invintiry-operator"}'
-# {"reply":"I'm your Inventory Operator ..."}   ← memory keyed invintiry-operator:cli:me
+  -d '{"conversation_id":"cli:me","message":"who are you?","agent_id":"my-agent"}'
+# {"reply":"I'm ..."}            ← memory keyed my-agent:cli:me
 ```
 
 Errors are always `{"error": "<message>"}` with the status code carrying the kind: 400 the caller can fix, 404 unknown agent, 503 memory service or identity provider unavailable, 500 a bug here.
@@ -200,10 +201,12 @@ service, not as code here. A request naming `agent_id` goes through:
 
 ### Toolsets: what an agent may *do*
 
-Tools are code; which agent holds them is configuration. `business_services/toolsets/`
-is a registry of named toolsets (today: `invintiry` — find/get/create/move over the
-Invintiry API via `api_integrations/invintiry/`), and `AGENT_TOOLSETS` binds them to
-agents. Three properties are structural, not stylistic:
+Tools are code; which agent holds them is configuration, and *where* that code lives is
+configuration too. The brain ships no integration of its own: `AGENT_TOOLSETS` binds an
+agent to a toolset *name*, and `TOOLSET_SOURCES` says where that name's builder lives
+(`alias=module:attribute`), imported at startup — so a toolset the brain has never heard
+of binds without touching this repo. `LINK_PROVIDERS` does the same for the provider that
+lets a person connect their own account. Three properties are structural, not stylistic:
 
 - **The prompt lists only real tools.** Every agent's system prompt ends with an
   *Available Tools* section derived from the toolsets actually bound — `none`, with an

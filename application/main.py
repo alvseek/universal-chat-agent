@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from typing import Callable
 
 import httpx
 from fastapi import FastAPI
@@ -25,8 +24,6 @@ from application.api_integrations.authentra.token_provider import (
     ClientCredentialsTokenProvider,
     TokenError,
 )
-from application.api_integrations.invintiry.invintiry_client import InvintiryClient
-from application.api_integrations.invintiry.link_provider import InvintiryLinkProvider
 from application.api_integrations.munnin.munnin_client import MunninClient, MunninError
 from application.api_integrations.openrouter.llm_client import build_agent
 from application.business_domain import awakening_domain
@@ -58,57 +55,29 @@ from application.middleware.error_handler import (
 log = logging.getLogger("universal-chat-agent")
 
 
-def build_bindings(
-    config: Config,
-) -> tuple[dict[str, list], httpx.AsyncClient | None, Callable[[str], InvintiryClient] | None]:
-    """agent_id -> instantiated toolsets, from AGENT_TOOLSETS.
+def build_bindings(config: Config) -> dict[str, list]:
+    """agent_id -> instantiated toolsets, from AGENT_TOOLSETS and TOOLSET_SOURCES.
 
-    Fails at startup — never at chat time — when a binding names an unknown
-    toolset or one whose backing service is not configured.
+    Fails at startup — never at chat time — when a binding names a toolset whose
+    source was not named, or whose own configuration is missing.
 
-    What goes into ``deps`` is only what is identical for every caller: how to
-    build a client, not a built one. The credential arrives per run, because an
-    agent built here is kept warm for hours and answers everybody.
-
-    Returns the shared connection pool (if any) so the composition root can close
-    it on shutdown — the per-caller clients borrow it and never close it — and the
-    client factory itself, so linking uses the very same one rather than a second
-    copy that could drift from it.
+    What goes into ``deps`` is only what is identical for every caller: shared
+    build-time facilities, never a credential. A credential arrives per run,
+    because an agent built here is kept warm for hours and answers everybody.
     """
     if not config.agent_toolsets:
-        return {}, None, None
+        return {}
     builders = load_builders(config.toolset_sources)
     deps: dict = {}
-    invintiry_http: httpx.AsyncClient | None = None
-    make_invintiry_client: Callable[[str], InvintiryClient] | None = None
-    # Bundled default, kept so an existing deployment binds its toolset with no new
-    # config line. A generic deployment names every source in TOOLSET_SOURCES
-    # instead, and this branch is what goes away.
-    if config.invintiry:
-        invintiry_http = httpx.AsyncClient(timeout=30.0)
-        api_url = config.invintiry.api_url
-
-        def make_invintiry_client(token: str) -> InvintiryClient:  # noqa: F811
-            return InvintiryClient(api_url, token, client=invintiry_http)
-
-        deps["invintiry_make_client"] = make_invintiry_client
     bindings: dict[str, list] = {}
     for agent_id, toolset in config.agent_toolsets:
-        try:
-            built = build_toolsets([toolset], deps, builders)
-        except KeyError as exc:
-            raise ValueError(
-                f"AGENT_TOOLSETS binds {agent_id!r} to {toolset!r}, which needs "
-                f"{exc.args[0]!r} — is its service configured?"
-            ) from exc
+        built = build_toolsets([toolset], deps, builders)
         bindings.setdefault(agent_id, []).extend(built)
-    return bindings, invintiry_http, make_invintiry_client
+    return bindings
 
 
-def _link_providers(
-    config: Config, make_invintiry_client: Callable[[str], InvintiryClient] | None
-) -> dict[str, LinkProvider]:
-    """service name -> provider, from LINK_PROVIDERS (or the bundled default).
+def _link_providers(config: Config) -> dict[str, LinkProvider]:
+    """service name -> provider, from LINK_PROVIDERS.
 
     Each source names a zero-argument factory: a provider reads its own service's
     configuration, so the brain never has to know which services exist.
@@ -117,10 +86,6 @@ def _link_providers(
     for name, target in config.link_providers:
         factory = import_callable(target, what=f"link provider {name!r}")
         providers[name] = factory()
-    if not providers and config.invintiry and make_invintiry_client is not None:
-        providers["invintiry"] = InvintiryLinkProvider(
-            make_invintiry_client, config.invintiry.brain_token
-        )
     return providers
 
 
@@ -190,7 +155,7 @@ def create_app() -> FastAPI:
         api_key=config.openrouter_api_key,
         system_prompt=config.system_prompt,
     )
-    bindings, invintiry_http, make_invintiry_client = build_bindings(config)
+    bindings = build_bindings(config)
     registry: AgentRegistry | None = None
     http: httpx.AsyncClient | None = None
     if config.memory_service:
@@ -204,7 +169,7 @@ def create_app() -> FastAPI:
 
     # Linking exists only where there is a service to link to. Without it the
     # brain is exactly what it was: an agent with no per-caller credentials.
-    providers = _link_providers(config, make_invintiry_client)
+    providers = _link_providers(config)
     links: LinkService | None = None
     if providers:
         links = LinkService(ServiceLinkRepository(config.db_path), providers)
@@ -218,8 +183,6 @@ def create_app() -> FastAPI:
         yield
         if http is not None:
             await http.aclose()
-        if invintiry_http is not None:
-            await invintiry_http.aclose()
 
     app = FastAPI(title="universal-chat-agent", lifespan=lifespan)
     app.state.config = config

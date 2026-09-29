@@ -30,7 +30,7 @@ def test_binding_with_configured_service_builds_toolsets():
 
 
 def test_binding_without_backing_service_names_the_gap():
-    with pytest.raises(ValueError, match="INVINTIRY_API_URL"):
+    with pytest.raises(ValueError, match="invintiry_make_client"):
         build_bindings(_config((("invintiry-operator", "invintiry"),)))
 
 

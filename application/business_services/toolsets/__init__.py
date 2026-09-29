@@ -1,8 +1,10 @@
 """The named toolsets this brain can bind to an agent.
 
 Code owns the mechanism (what a toolset named ``invintiry`` does); configuration
-owns the selection (``AGENT_TOOLSETS=invintiry-operator=invintiry``). An agent
-with no binding gets no tools — and its prompt says so.
+owns both the selection (``AGENT_TOOLSETS=invintiry-operator=invintiry``) and
+where each name's builder comes from
+(``TOOLSET_SOURCES=invintiry=my_pkg.toolsets:build``). An agent with no binding
+gets no tools — and its prompt says so.
 """
 from __future__ import annotations
 
@@ -10,29 +12,42 @@ from typing import Any, Callable, Mapping, Sequence
 
 from pydantic_ai.toolsets.abstract import AbstractToolset
 
+from application.common.loading import import_callable
+
 from .invintiry import build_invintiry_toolsets
 
-# name -> builder(deps) -> toolsets. Builders receive the shared deps mapping and
-# pick what they need, so adding a toolset never changes this module's shape.
-_BUILDERS: dict[str, Callable[[Mapping[str, Any]], list[AbstractToolset]]] = {
+Builder = Callable[[Mapping[str, Any]], list[AbstractToolset]]
+
+# Builders bundled with the brain itself. A generic deployment ships none and
+# names every source in TOOLSET_SOURCES instead.
+_BUNDLED: dict[str, Builder] = {
     "invintiry": build_invintiry_toolsets,
 }
 
 
-def known_toolsets() -> list[str]:
-    return sorted(_BUILDERS)
+def load_builders(specs: Sequence[tuple[str, str]]) -> dict[str, Builder]:
+    """Resolve ``alias=module:attribute`` specs into builders, over the bundled set."""
+    builders: dict[str, Builder] = dict(_BUNDLED)
+    for name, target in specs:
+        builders[name] = import_callable(target, what=f"toolset source {name!r}")
+    return builders
+
+
+def known_toolsets(builders: Mapping[str, Builder]) -> list[str]:
+    return sorted(builders)
 
 
 def build_toolsets(
-    names: Sequence[str], deps: Mapping[str, Any]
+    names: Sequence[str], deps: Mapping[str, Any], builders: Mapping[str, Builder]
 ) -> list[AbstractToolset]:
     """Instantiate the named toolsets. Unknown names raise at startup, not at chat time."""
     toolsets: list[AbstractToolset] = []
     for name in names:
-        builder = _BUILDERS.get(name)
+        builder = builders.get(name)
         if builder is None:
             raise ValueError(
-                f"unknown toolset {name!r} in AGENT_TOOLSETS (known: {', '.join(known_toolsets())})"
+                f"unknown toolset {name!r} "
+                f"(known: {', '.join(known_toolsets(builders))})"
             )
         toolsets.extend(builder(deps))
     return toolsets

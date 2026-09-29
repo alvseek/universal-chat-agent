@@ -130,13 +130,15 @@ def _build(tmp_path, model, links_seed, fail_auth_for=()):
         link_repo.put("invintiry", end_user_id, token)
     pending = PendingApprovalRepository(db)
     service = ChatService(
-        agent, MessageRepository(db), 15, None, pending, LinkService(link_repo, _Provider())
+        agent, MessageRepository(db), 15, None, pending,
+        LinkService(link_repo, {"invintiry": _Provider()}),
     )
     return service, pending, link_repo
 
 
 class _Provider:
-    service = "invintiry"
+    account_label = "inventory"
+    how_to_link = "Go to Settings → Chat Apps and tap the link."
 
     async def redeem(self, code, end_user_id):  # pragma: no cover - not used here
         raise AssertionError("not exercised")

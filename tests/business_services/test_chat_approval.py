@@ -80,12 +80,13 @@ class _LinkedCaller:
 class _StubProvider:
     """Enough of a link provider for tests that never redeem or revoke."""
 
-    service = "invintiry"
+    account_label = "inventory"
+    how_to_link = "Tap the link in your account settings."
 
     async def redeem(self, code, end_user_id):  # pragma: no cover - unused here
         raise AssertionError("these tests do not redeem")
 
-    async def revoke(self, token):
+    async def revoke(self, token, end_user_id):
         return None
 
 
@@ -107,7 +108,7 @@ def _service(tmp_path, call=MOVE_CALL, linked=True):
     if linked:
         links.put("invintiry", CALLER, "user-token")
     service = ChatService(
-        agent, repo, 15, None, pending, LinkService(links, _StubProvider())
+        agent, repo, 15, None, pending, LinkService(links, {"invintiry": _StubProvider()})
     )
     return _LinkedCaller(service), client, pending
 

@@ -31,10 +31,16 @@ from application.api_integrations.munnin.munnin_client import MunninClient, Munn
 from application.api_integrations.openrouter.llm_client import build_agent
 from application.business_domain import awakening_domain
 from application.business_domain.awakening_domain import AgentNotFound
+from application.business_domain.link_provider import LinkProvider
 from application.business_services.agent_registry import AgentRegistry
 from application.business_services.chat_service import ChatService
 from application.business_services.link_service import LinkService
-from application.business_services.toolsets import build_toolsets, describe_toolsets
+from application.business_services.toolsets import (
+    build_toolsets,
+    describe_toolsets,
+    load_builders,
+)
+from application.common.loading import import_callable
 from application.configuration.env import Config, MemoryServiceConfig, load_config
 from application.data_repositories.message_repository import MessageRepository
 from application.data_repositories.pending_approval_repository import (
@@ -71,9 +77,13 @@ def build_bindings(
     """
     if not config.agent_toolsets:
         return {}, None, None
+    builders = load_builders(config.toolset_sources)
     deps: dict = {}
     invintiry_http: httpx.AsyncClient | None = None
     make_invintiry_client: Callable[[str], InvintiryClient] | None = None
+    # Bundled default, kept so an existing deployment binds its toolset with no new
+    # config line. A generic deployment names every source in TOOLSET_SOURCES
+    # instead, and this branch is what goes away.
     if config.invintiry:
         invintiry_http = httpx.AsyncClient(timeout=30.0)
         api_url = config.invintiry.api_url
@@ -85,14 +95,33 @@ def build_bindings(
     bindings: dict[str, list] = {}
     for agent_id, toolset in config.agent_toolsets:
         try:
-            built = build_toolsets([toolset], deps)
+            built = build_toolsets([toolset], deps, builders)
         except KeyError as exc:
             raise ValueError(
                 f"AGENT_TOOLSETS binds {agent_id!r} to {toolset!r}, which needs "
-                f"{exc.args[0]!r} — is its service configured (e.g. INVINTIRY_API_URL)?"
+                f"{exc.args[0]!r} — is its service configured?"
             ) from exc
         bindings.setdefault(agent_id, []).extend(built)
     return bindings, invintiry_http, make_invintiry_client
+
+
+def _link_providers(
+    config: Config, make_invintiry_client: Callable[[str], InvintiryClient] | None
+) -> dict[str, LinkProvider]:
+    """service name -> provider, from LINK_PROVIDERS (or the bundled default).
+
+    Each source names a zero-argument factory: a provider reads its own service's
+    configuration, so the brain never has to know which services exist.
+    """
+    providers: dict[str, LinkProvider] = {}
+    for name, target in config.link_providers:
+        factory = import_callable(target, what=f"link provider {name!r}")
+        providers[name] = factory()
+    if not providers and config.invintiry and make_invintiry_client is not None:
+        providers["invintiry"] = InvintiryLinkProvider(
+            make_invintiry_client, config.invintiry.brain_token
+        )
+    return providers
 
 
 def _tools_block(toolsets: list) -> str:
@@ -175,12 +204,10 @@ def create_app() -> FastAPI:
 
     # Linking exists only where there is a service to link to. Without it the
     # brain is exactly what it was: an agent with no per-caller credentials.
+    providers = _link_providers(config, make_invintiry_client)
     links: LinkService | None = None
-    if config.invintiry and make_invintiry_client is not None:
-        links = LinkService(
-            ServiceLinkRepository(config.db_path),
-            InvintiryLinkProvider(make_invintiry_client, config.invintiry.brain_token),
-        )
+    if providers:
+        links = LinkService(ServiceLinkRepository(config.db_path), providers)
 
     service = ChatService(
         default_agent, repository, config.memory_window, registry, pending, links

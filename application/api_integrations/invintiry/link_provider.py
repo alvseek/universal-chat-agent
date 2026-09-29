@@ -7,6 +7,10 @@ two services can never collide, while invintiry wants the service and the
 account id as two separate fields — and the module that already speaks
 invintiry's wire shapes is the right one to know it.
 
+It also translates invintiry's HTTP refusals into the brain's ``LinkErrorKind``
+vocabulary, so the sentences a person reads are written in one place and do not
+drift per service.
+
 Nothing here enumerates the services. Invintiry owns that registry and validates
 both the service name and the shape of an account id, so a transport added to
 the bridge reaches inventory with no change on this side. An id refused *here*
@@ -15,26 +19,31 @@ service this module has not heard of, because it has heard of none of them.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Callable
 
 from application.api_integrations.invintiry.invintiry_client import (
     InvintiryClient,
     InvintiryError,
 )
+from application.business_domain.link_provider import (
+    LinkedAccount,
+    LinkError,
+    LinkErrorKind,
+    UnsupportedPlatform,
+)
+
+# How a status from invintiry maps onto the brain's vocabulary. 400 covers both a
+# stale code and a service or account shape invintiry will not accept, which is why
+# the detail is carried through for the log rather than dropped.
+_KINDS = {
+    0: LinkErrorKind.UNREACHABLE,
+    400: LinkErrorKind.STALE_CODE,
+    409: LinkErrorKind.CONFLICT,
+}
 
 
-class UnsupportedPlatform(ValueError):
-    """The end user id was not a ``platform:account`` pair this module could split."""
-
-
-@dataclass(frozen=True)
-class LinkedAccount:
-    """What a successful redeem hands back."""
-
-    token: str
-    display_name: str
-    workspace_name: str
+def _translate(exc: InvintiryError) -> LinkError:
+    return LinkError(_KINDS.get(exc.status, LinkErrorKind.OTHER), exc.detail)
 
 
 def split_end_user_id(end_user_id: str) -> tuple[str, str]:
@@ -55,7 +64,11 @@ def split_end_user_id(end_user_id: str) -> tuple[str, str]:
 class InvintiryLinkProvider:
     """Redeems codes on the brain's own credential; revokes on the user's."""
 
-    service = "invintiry"
+    account_label = "inventory"
+    how_to_link = (
+        "Open invintiry in your browser, go to Settings → Chat Apps, and tap the "
+        "link it shows you. That connects this chat to your own inventory."
+    )
 
     def __init__(
         self, make_client: Callable[[str], InvintiryClient], brain_token: str
@@ -69,17 +82,22 @@ class InvintiryLinkProvider:
         # none yet. It is deliberately not workspace-scoped, so one credential
         # serves whichever workspace the code belongs to.
         client = self._make_client(self._brain_token)
-        payload = await client.redeem_link(code, platform, external_id)
+        try:
+            payload = await client.redeem_link(code, platform, external_id)
+        except InvintiryError as exc:
+            raise _translate(exc) from exc
         token = (payload or {}).get("token")
         if not token:
             # A 201 with no credential in it. Rare, but the person is mid-flow,
             # so this has to become a sentence about linking rather than escape
             # as an unhandled error and reach them as a generic apology.
-            raise InvintiryError(502, "link succeeded but returned no token")
+            raise LinkError(
+                LinkErrorKind.OTHER, "link succeeded but returned no token"
+            )
         return LinkedAccount(
             token=token,
             display_name=payload.get("user_display_name") or "you",
-            workspace_name=payload.get("workspace_name")
+            account_name=payload.get("workspace_name")
             or payload.get("workspace_slug")
             or "your workspace",
         )
@@ -92,4 +110,7 @@ class InvintiryLinkProvider:
         named even though the credential already identifies the person.
         """
         platform, _ = split_end_user_id(end_user_id)
-        await self._make_client(token).unlink(platform)
+        try:
+            await self._make_client(token).unlink(platform)
+        except InvintiryError as exc:
+            raise _translate(exc) from exc

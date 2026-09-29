@@ -73,6 +73,11 @@ class Config:
     # what a toolset does; this mapping owns who gets it. Empty = no agent has tools.
     agent_toolsets: tuple[tuple[str, str], ...]
     invintiry: InvintiryConfig | None
+    # Where the builder for each named toolset comes from (TOOLSET_SOURCES) and
+    # where each link provider comes from (LINK_PROVIDERS), both written as
+    # alias=module:attribute. Empty = only whatever the brain itself bundles.
+    toolset_sources: tuple[tuple[str, str], ...] = ()
+    link_providers: tuple[tuple[str, str], ...] = ()
 
 
 def _require(name: str) -> str:
@@ -129,6 +134,24 @@ def _agent_toolsets() -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
+def _sources(name: str) -> tuple[tuple[str, str], ...]:
+    """Parse ``NAME=alias=module:attribute`` into (alias, target) pairs.
+
+    The alias is what ``AGENT_TOOLSETS`` (or a stored service name) refers to; the
+    target is where the object lives. A colon is required in the target so a bare
+    module name cannot be mistaken for one.
+    """
+    pairs: list[tuple[str, str]] = []
+    for part in _csv(name):
+        alias, separator, target = part.partition("=")
+        if not separator or not alias.strip() or ":" not in target:
+            raise ValueError(
+                f"{name}: {part!r} is not an alias=module:attribute pair"
+            )
+        pairs.append((alias.strip(), target.strip()))
+    return tuple(pairs)
+
+
 def _invintiry() -> InvintiryConfig | None:
     url = os.getenv("INVINTIRY_API_URL", "").strip().rstrip("/")
     if not url:
@@ -151,4 +174,6 @@ def load_config() -> Config:
         memory_service=_memory_service(),
         agent_toolsets=_agent_toolsets(),
         invintiry=_invintiry(),
+        toolset_sources=_sources("TOOLSET_SOURCES"),
+        link_providers=_sources("LINK_PROVIDERS"),
     )

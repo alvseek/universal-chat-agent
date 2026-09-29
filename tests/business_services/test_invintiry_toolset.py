@@ -202,14 +202,14 @@ def test_writes_require_approval_reads_do_not():
 
 
 def test_registry_builds_and_rejects_unknown():
-    ts = registry.build_toolsets(["invintiry"], _deps(FakeClient()))
+    ts = registry.build_toolsets(["invintiry"], _deps(FakeClient()), registry.load_builders(()))
     assert len(ts) == 2
     with pytest.raises(ValueError, match="unknown toolset 'nope'"):
-        registry.build_toolsets(["nope"], {})
+        registry.build_toolsets(["nope"], {}, registry.load_builders(()))
 
 
 def test_describe_toolsets_lists_every_tool_once():
-    ts = registry.build_toolsets(["invintiry"], _deps(FakeClient()))
+    ts = registry.build_toolsets(["invintiry"], _deps(FakeClient()), registry.load_builders(()))
     lines = registry.describe_toolsets(ts)
     names = [line.split(" — ")[0] for line in lines]
     assert sorted(names) == [

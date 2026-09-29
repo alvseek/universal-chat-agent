@@ -11,32 +11,56 @@ Two shapes are deliberate:
   the issuer with nothing left here to revoke it with — a credential nobody can
   reach is worse than one you can still see.
 * **Refusals are replies, not exceptions.** Every failure a person can cause —
-  a stale code, a code already bound to someone else, inventory being down —
+  a stale code, a code already bound to someone else, a service being down —
   comes back as a sentence for them to read. An exception here would surface as
   the bridge's generic "something went wrong", which tells them nothing about
   what to do next.
+
+The sentences are the brain's, not a service's. A provider hands over a label and
+a how-to-link line; everything a person reads is composed here. That is what lets
+a service this brain has never heard of be linked without touching this file.
 """
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
-from application.api_integrations.invintiry.invintiry_client import InvintiryError
-from application.api_integrations.invintiry.link_provider import UnsupportedPlatform
 from application.business_domain import link_commands as lc
+from application.business_domain.link_provider import (
+    LinkError,
+    LinkErrorKind,
+    LinkProvider,
+    UnsupportedPlatform,
+)
 from application.data_repositories.service_link_repository import ServiceLinkRepository
 
 log = logging.getLogger("universal-chat-agent")
 
-HOW_TO_LINK = (
-    "Open invintiry in your browser, go to Settings → Chat Apps, and tap the "
-    "link it shows you. That connects this chat to your own inventory."
-)
-
 
 class LinkService:
-    def __init__(self, repository: ServiceLinkRepository, provider) -> None:
+    def __init__(
+        self, repository: ServiceLinkRepository, providers: Mapping[str, LinkProvider]
+    ) -> None:
         self._repo = repository
-        self._provider = provider
+        self._providers = dict(providers)
+
+    def _sole(self) -> tuple[str, LinkProvider] | None:
+        """The one provider, when there is exactly one to address a code to.
+
+        A link code names no service — only the service that issued it can redeem
+        it — so a redemption is unambiguous only while a single provider is
+        configured. The store is per service, so logout needs no such guarantee.
+        """
+        if len(self._providers) != 1:
+            return None
+        name = next(iter(self._providers))
+        return name, self._providers[name]
+
+    @staticmethod
+    def _how_to_link(provider: LinkProvider | None) -> str:
+        if provider is None:
+            return "Ask the service you want to connect for a link code."
+        return provider.how_to_link
 
     def credentials(self, end_user_id: str | None) -> dict[str, str]:
         """This caller's tokens by service — empty when nobody is linked."""
@@ -48,7 +72,7 @@ class LinkService:
         Used when a service refuses a token we still hold: the binding was
         revoked from the web side, so keeping the row only produces more 401s.
 
-        Scoped to the one service on purpose — being refused by inventory says
+        Scoped to the one service on purpose — being refused by one service says
         nothing about this person's link to anything else, and dropping those too
         would silently unlink them from services that never complained.
         """
@@ -57,68 +81,78 @@ class LinkService:
 
     async def execute(self, command: lc.LinkCommand, end_user_id: str | None) -> str:
         """Carry out a link command and return the reply the person should see."""
+        sole = self._sole()
+        provider = sole[1] if sole else None
         if end_user_id is None:
             # No caller identity means no one to link; only a bridge that sends
             # end_user_id can offer linking at all.
-            return "This chat can't be linked to an inventory account."
+            return "This chat can't be linked to an account."
         if command.kind == lc.PROMPT:
-            return self._prompt(end_user_id)
+            return self._prompt(end_user_id, provider)
         if command.kind == lc.BAD_CODE:
-            return "That doesn't look like a link code. " + HOW_TO_LINK
+            return "That doesn't look like a link code. " + self._how_to_link(provider)
         if command.kind == lc.REDEEM:
-            return await self._redeem(command.code or "", end_user_id)
+            return await self._redeem(command.code or "", end_user_id, sole)
         if command.kind == lc.LOGOUT:
             return await self._logout(end_user_id)
-        return HOW_TO_LINK  # unreachable today; a new kind should still say something
+        return self._how_to_link(provider)  # a new kind should still say something
 
-    def _prompt(self, end_user_id: str) -> str:
+    def _prompt(self, end_user_id: str, provider: LinkProvider | None) -> str:
         linked = self._repo.credentials(end_user_id)
         if linked:
             return (
                 f"You're already linked to {', '.join(sorted(linked))}. "
                 "Send /logout to disconnect."
             )
-        return "Hi! I'm not linked to your inventory yet. " + HOW_TO_LINK
+        if provider is None:
+            return "Hi! I'm not linked to anything yet. " + self._how_to_link(provider)
+        return (
+            f"Hi! I'm not linked to your {provider.account_label} yet. "
+            + self._how_to_link(provider)
+        )
 
-    async def _redeem(self, code: str, end_user_id: str) -> str:
+    async def _redeem(
+        self, code: str, end_user_id: str, sole: tuple[str, LinkProvider] | None
+    ) -> str:
+        if sole is None:
+            return "Linking isn't set up here yet."
+        name, provider = sole
         try:
-            account = await self._provider.redeem(code, end_user_id)
+            account = await provider.redeem(code, end_user_id)
         except UnsupportedPlatform:
             return "Linking isn't available for this chat platform yet."
-        except InvintiryError as exc:
-            return self._redeem_error(exc)
-        self._repo.put(self._provider.service, end_user_id, account.token)
-        log.info(
-            "linked %s to %s (%s)",
-            end_user_id, self._provider.service, account.workspace_name,
-        )
+        except LinkError as exc:
+            return self._redeem_error(exc, provider)
+        self._repo.put(name, end_user_id, account.token)
+        log.info("linked %s to %s (%s)", end_user_id, name, account.account_name)
         return (
-            f"Linked as {account.display_name} — {account.workspace_name}. "
-            "You can ask me about your inventory now."
+            f"Linked as {account.display_name} — {account.account_name}. "
+            f"You can ask me about your {provider.account_label} now."
         )
 
     @staticmethod
-    def _redeem_error(exc: InvintiryError) -> str:
-        if exc.status == 400:
-            # A 400 is nearly always a stale code, but it is also how inventory
-            # refuses a chat service it does not offer or an account id
-            # malformed for one. Those two would send a person round the
-            # generate-a-fresh-code loop forever, and only this log says which
-            # of the three actually happened.
-            log.warning("redeem refused: 400 %s", exc.detail)
+    def _redeem_error(exc: LinkError, provider: LinkProvider) -> str:
+        if exc.kind == LinkErrorKind.STALE_CODE:
+            # A stale code is the common case, but a service may reuse this refusal
+            # for a shape it will not accept, so the detail is logged rather than
+            # swallowed — the sentence a person reads cannot tell them apart.
+            log.warning("redeem refused: %s %s", exc.kind.value, exc.detail)
             return (
                 "That link code didn't work — codes are single-use and expire "
                 "after about five minutes. Generate a fresh one and try again."
             )
-        if exc.status == 409:
+        if exc.kind == LinkErrorKind.CONFLICT:
             return (
-                "This chat account is already linked to a different inventory "
-                "user. Send /logout there first, or disconnect it from Settings "
-                "→ Chat Apps."
+                "This chat account is already linked to a different "
+                f"{provider.account_label} account. Send /logout here first, or "
+                "disconnect it from your account settings."
             )
-        if exc.status == 0:
-            return "I can't reach inventory right now. Try again in a moment."
-        log.warning("redeem failed: %s %s", exc.status, exc.detail)
+        if exc.kind == LinkErrorKind.UNREACHABLE:
+            return (
+                f"I can't reach {provider.account_label} right now. "
+                "Try again in a moment."
+            )
+        log.warning("redeem failed: %s %s", exc.kind.value, exc.detail)
         return "Linking failed. Try generating a fresh code."
 
     async def _logout(self, end_user_id: str) -> str:
@@ -128,18 +162,21 @@ class LinkService:
 
         revoked, kept = [], []
         for service, token in sorted(linked.items()):
-            if service != self._provider.service:
+            provider = self._providers.get(service)
+            if provider is None:
                 # No provider for it, so the row goes but the credential upstream
                 # cannot be revoked from here. Say so rather than imply otherwise.
                 kept.append(service)
                 continue
             try:
-                await self._provider.revoke(token, end_user_id)
+                await provider.revoke(token, end_user_id)
                 revoked.append(service)
-            except InvintiryError as exc:
+            except LinkError as exc:
                 # The local row still goes: leaving it would keep sending a token
                 # the user has asked us to stop using.
-                log.warning("revoke failed for %s: %s %s", service, exc.status, exc.detail)
+                log.warning(
+                    "revoke failed for %s: %s %s", service, exc.kind.value, exc.detail
+                )
                 kept.append(service)
 
         self._repo.delete_all(end_user_id)
@@ -149,9 +186,9 @@ class LinkService:
             return (
                 f"Disconnected from {', '.join(revoked + kept)}. "
                 f"Couldn't revoke {', '.join(kept)} upstream — disconnect it from "
-                "Settings → Chat Apps to be sure."
+                "your account settings to be sure."
             )
         return (
             f"Disconnected from {', '.join(kept)} here, but couldn't revoke upstream "
-            "— disconnect it from Settings → Chat Apps to be sure."
+            "— disconnect it from your account settings to be sure."
         )

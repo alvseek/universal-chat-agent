@@ -9,20 +9,25 @@ import asyncio
 
 import pytest
 
-from application.api_integrations.invintiry.invintiry_client import InvintiryError
 from application.api_integrations.invintiry.link_provider import (
     InvintiryLinkProvider,
-    LinkedAccount,
-    UnsupportedPlatform,
     split_end_user_id,
 )
 from application.business_domain import link_commands as lc
+from application.business_domain.link_provider import (
+    LinkError,
+    LinkErrorKind,
+    LinkedAccount,
+    UnsupportedPlatform,
+)
 from application.business_services.link_service import LinkService
 from application.data_repositories.service_link_repository import ServiceLinkRepository
 
 
 class FakeProvider:
-    service = "invintiry"
+    account_label = "inventory"
+    # The words the brain borrows for its own sentences — and nothing more.
+    how_to_link = "Open invintiry, go to Settings → Chat Apps, and tap the link."
 
     def __init__(self, account=None, error=None, revoke_error=None):
         self._account = account or LinkedAccount("user-token", "Alvi", "Alviandi Inventory")
@@ -48,7 +53,7 @@ class FakeProvider:
 def _service(tmp_path, provider=None):
     repo = ServiceLinkRepository(str(tmp_path / "agent.db"))
     provider = provider or FakeProvider()
-    return LinkService(repo, provider), repo, provider
+    return LinkService(repo, {"invintiry": provider}), repo, provider
 
 
 def _run(service, kind, end_user_id="telegram:1", code=None):
@@ -78,17 +83,17 @@ def test_relinking_replaces_the_previous_token(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "status, expected",
+    "kind, expected",
     [
-        (400, "single-use"),
-        (409, "already linked"),
-        (0, "can't reach"),
-        (500, "Linking failed"),
+        (LinkErrorKind.STALE_CODE, "single-use"),
+        (LinkErrorKind.CONFLICT, "already linked"),
+        (LinkErrorKind.UNREACHABLE, "can't reach"),
+        (LinkErrorKind.OTHER, "Linking failed"),
     ],
 )
-def test_a_refused_redeem_becomes_a_sentence_not_an_exception(tmp_path, status, expected):
+def test_a_refused_redeem_becomes_a_sentence_not_an_exception(tmp_path, kind, expected):
     service, repo, _ = _service(
-        tmp_path, FakeProvider(error=InvintiryError(status, "nope"))
+        tmp_path, FakeProvider(error=LinkError(kind, "nope"))
     )
 
     reply = _run(service, lc.REDEEM, code="STALE")
@@ -147,7 +152,7 @@ def test_logout_when_nothing_is_linked_says_so(tmp_path):
 def test_logout_drops_the_row_even_when_revoke_fails(tmp_path):
     # Keeping it would go on sending a token the user asked us to stop using.
     service, repo, provider = _service(
-        tmp_path, FakeProvider(revoke_error=InvintiryError(500, "boom"))
+        tmp_path, FakeProvider(revoke_error=LinkError(LinkErrorKind.OTHER, "boom"))
     )
     repo.put("invintiry", "telegram:1", "user-token")
 
@@ -155,7 +160,7 @@ def test_logout_drops_the_row_even_when_revoke_fails(tmp_path):
 
     assert repo.credentials("telegram:1") == {}
     assert "couldn't revoke" in reply.lower()
-    assert "Settings" in reply  # tells them how to be sure
+    assert "settings" in reply  # tells them how to be sure
 
 
 def test_logout_unlinks_every_service_not_just_the_provider(tmp_path):
@@ -286,7 +291,7 @@ def test_a_success_carrying_no_token_becomes_a_link_failure():
             return {"user_display_name": "Alvi"}  # no token
 
     provider = InvintiryLinkProvider(Client, "BRAIN-TOKEN")
-    with pytest.raises(InvintiryError):
+    with pytest.raises(LinkError):
         asyncio.run(provider.redeem("CODE1", "telegram:42"))
 
 

@@ -15,7 +15,8 @@ def _set(monkeypatch, values):
     for name in ("MUNNIN_URL", "MUNNIN_RESOURCE", "MUNNIN_M2M_CLIENT_ID", "MUNNIN_M2M_CLIENT_SECRET",
                  "MUNNIN_M2M_SCOPE", "AUTHENTRA_ISSUER", "AGENT_CACHE_TTL_SECONDS",
                  "AWAKENING_LAYERS", "AWAKENING_EXCLUDE",
-                 "AGENT_TOOLSETS", "INVINTIRY_API_URL", "INVINTIRY_BRAIN_TOKEN", *BASE):
+                 "AGENT_TOOLSETS", "INVINTIRY_API_URL", "INVINTIRY_BRAIN_TOKEN",
+                 "TOOLSET_SOURCES", "LINK_PROVIDERS", *BASE):
         monkeypatch.delenv(name, raising=False)
     for k, v in {**BASE, **values}.items():
         monkeypatch.setenv(k, v)
@@ -96,3 +97,29 @@ def test_invintiry_url_requires_token(monkeypatch):
 def test_invintiry_config_strips_trailing_slash(monkeypatch):
     _set(monkeypatch, {"INVINTIRY_API_URL": "https://api.inv.example/", "INVINTIRY_BRAIN_TOKEN": "t"})
     assert env.load_config().invintiry.api_url == "https://api.inv.example"
+
+
+# -- extension points --------------------------------------------------------
+
+
+def test_sources_parse_into_alias_and_target(monkeypatch):
+    _set(monkeypatch, {
+        "TOOLSET_SOURCES": "invintiry=my_pkg.toolsets:build, other=other.mod:make",
+    })
+    assert env.load_config().toolset_sources == (
+        ("invintiry", "my_pkg.toolsets:build"),
+        ("other", "other.mod:make"),
+    )
+
+
+def test_an_extension_point_is_empty_when_unset(monkeypatch):
+    _set(monkeypatch, {})
+    config = env.load_config()
+    assert config.toolset_sources == () and config.link_providers == ()
+
+
+@pytest.mark.parametrize("bad", ["invintiry", "=mypkg:build", "invintiry=mypkg"])
+def test_a_malformed_extension_point_is_refused(monkeypatch, bad):
+    _set(monkeypatch, {"LINK_PROVIDERS": bad})
+    with pytest.raises(ValueError, match="alias=module:attribute"):
+        env.load_config()

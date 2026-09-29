@@ -38,24 +38,24 @@ Single-role repo: every entry is `shared` with empty `roles`, so the role filter
 - **type**: 7q-readme
 - **scope**: shared
 - **roles**: []
-- **status**: unverified
-- **tags**: [overview, entry-point, brain, http, memory, agents]
-- **last_verified**: ""
-- **verified_by**: ""
+- **status**: useful
+- **tags**: [overview, entry-point, brain, http, memory, agents, toolsets, extension-points]
+- **last_verified**: "2026-09-29"
+- **verified_by**: "software-architect / 2026-09-29 platform-free brain session"
 - **update_trigger**: ""
-- **notes**: "Root README. The brain is a bridge-agnostic conversational agent over HTTP: any chat front-end sends a message tagged with a conversation_id and gets a reply. The brain owns the model, the per-conversation memory, and the agent runtime. Carries this repo's ADRs."
+- **notes**: "Root README. The brain is a bridge-agnostic conversational agent over HTTP: any chat front-end sends a message tagged with a conversation_id and gets a reply. The brain owns the model, the per-conversation memory, and the agent runtime. Carries this repo's ADRs. Updated 2026-09-29: the brain ships NO integration of its own — `TOOLSET_SOURCES` / `LINK_PROVIDERS` name where each toolset and link provider comes from, the reference adapters are role-named (`llm/`, `oidc/`, `memory_service/`), and the env vars are `LLM_*` / `OIDC_ISSUER` / `MEMORY_SERVICE_*`."
 
 ### `application/common/README.md`
 
 - **type**: other
 - **scope**: shared
 - **roles**: []
-- **status**: unverified
+- **status**: useful
 - **tags**: [a-boxed, placeholder, layer, helpers]
-- **last_verified**: ""
-- **verified_by**: ""
+- **last_verified**: "2026-09-29"
+- **verified_by**: "software-architect / 2026-09-29 platform-free brain session"
 - **update_trigger**: ""
-- **notes**: "A-Boxed L1 placeholder, intentionally empty. Pure stateless helpers go here when they appear; the rule of thumb is that anything needing a mock in a test does not belong. The brain's actual pure rules are conversation rules and live in business_domain because they are domain-specific rather than generic."
+- **notes**: "No longer empty: `loading.py` turns a config-named `module:attribute` path into the object it names, shared by the two extension points (toolset sources and link providers). Still the layer for pure, stateless helpers; the brain's actual domain rules remain in `business_domain` because they are domain-specific rather than generic."
 
 ---
 

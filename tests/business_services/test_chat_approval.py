@@ -7,6 +7,7 @@ model here is a FunctionModel that always tries to call a write tool first — t
 most adversarial script for this property.
 """
 import asyncio
+import base64
 
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
@@ -64,9 +65,9 @@ class _LinkedCaller:
     def __init__(self, service):
         self._service = service
 
-    async def handle(self, conversation_id, message):
+    async def handle(self, conversation_id, message, image=None):
         return await self._service.handle(
-            conversation_id, message, end_user_id=CALLER
+            conversation_id, message, end_user_id=CALLER, image=image
         )
 
 
@@ -163,3 +164,37 @@ def test_pending_is_per_conversation(tmp_path):
     reply = asyncio.run(service.handle("c3", "ya"))
     assert demo.stored == ["Rak C"]
     assert "result:" in reply
+
+
+def test_a_photo_survives_the_approval_pause(tmp_path):
+    """The write executes two turns later, so the photo from the request turn is
+    parked with it and restored on the resume — the "yes" turn carries none."""
+    service, pending = _service(tmp_path)
+    raw = b"\x89PNG\r\n\x1a\nphoto-bytes"
+
+    asyncio.run(
+        service.handle("c7", "store Rak C", image=base64.b64encode(raw).decode())
+    )
+
+    parked = pending.get("c7")
+    assert parked is not None and parked.image == raw
+    assert demo.stored == []  # nothing ran yet
+
+    asyncio.run(service.handle("c7", "yes"))
+
+    assert demo.stored == ["Rak C"]
+    assert demo.images == [raw]  # the tool saw the photo from the parked turn
+
+
+def test_a_declined_photo_is_discarded(tmp_path):
+    service, pending = _service(tmp_path)
+    raw = b"\x89PNG\r\n\x1a\nphoto-bytes"
+
+    asyncio.run(
+        service.handle("c8", "store Rak C", image=base64.b64encode(raw).decode())
+    )
+    asyncio.run(service.handle("c8", "no thanks"))
+
+    assert pending.get("c8") is None
+    assert demo.images == []
+    assert demo.stored == []

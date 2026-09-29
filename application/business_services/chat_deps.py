@@ -34,3 +34,8 @@ class ChatDeps:
     # where credentials are stored; the service name is required because being
     # refused by one service says nothing about a caller's links to any other.
     on_auth_failed: Callable[[str], None] | None = None
+    # The photo the caller attached to this turn, as raw bytes — or None when the
+    # turn carried none. It travels *beside* the prompt, never inside it: the model
+    # is told a photo arrived, and only whichever tool consumes it reads the bytes.
+    # On a resumed run (an approved write) this is the image parked with the pause.
+    image: bytes | None = None

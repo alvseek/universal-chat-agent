@@ -19,6 +19,8 @@ every tool call in a turn runs on that person's own tokens and nobody else's.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import string
 
 from pydantic_ai import Agent
@@ -50,6 +52,21 @@ _YES = frozenset({"yes", "y", "ya", "iya", "yup", "confirm", "yes please"})
 
 def is_clear_yes(text: str) -> bool:
     return text.strip().strip(string.punctuation + " ").lower() in _YES
+
+
+def _decode_image(image_b64: str | None) -> bytes | None:
+    """Decode the bridge's base64 photo, or None when the turn carried none.
+
+    A value that is not valid base64 is the caller's mistake, not a crash: raising
+    ``ValueError`` lets the error middleware answer 400, the same way a bad
+    conversation_id already does.
+    """
+    if image_b64 is None:
+        return None
+    try:
+        return base64.b64decode(image_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("image is not valid base64") from exc
 
 
 def confirmation_reply(summary: str) -> str:
@@ -86,10 +103,10 @@ class ChatService:
             )
         return await self._registry.get(agent_id)
 
-    def _deps(self, end_user_id: str | None) -> ChatDeps:
-        """This caller's credentials, for the length of this turn."""
+    def _deps(self, end_user_id: str | None, image: bytes | None = None) -> ChatDeps:
+        """This caller's credentials (and any attached photo), for this turn."""
         if self._links is None:
-            return ChatDeps()
+            return ChatDeps(image=image)
         return ChatDeps(
             credentials=self._links.credentials(end_user_id),
             end_user_id=end_user_id,
@@ -97,6 +114,7 @@ class ChatService:
             # revoked from the web side, and keeping it only produces more 401s.
             # Scoped by service — one refusal must not unlink the others.
             on_auth_failed=lambda service: self._links.forget(end_user_id, service),
+            image=image,
         )
 
     async def handle(
@@ -105,6 +123,7 @@ class ChatService:
         message: str,
         agent_id: str | None = None,
         end_user_id: str | None = None,
+        image: str | None = None,
     ) -> str:
         cid = domain.normalize_conversation_id(conversation_id)
         key = memory_key(cid, agent_id)
@@ -114,13 +133,16 @@ class ChatService:
             return await self._handle_link(command, key, message, end_user_id)
 
         agent = await self._resolve_agent(agent_id)
-        deps = self._deps(end_user_id)
-
         pending = self._pending.get(key) if self._pending else None
+
         if pending is not None:
+            # The parked write runs on THIS turn, and the photo that belongs to it
+            # was parked beside it — because the confirm turn ("yes") carries none.
+            image_bytes = pending.image
             # Delete before resuming: a crash mid-resume loses the pending write
             # rather than replaying it (lost beats doubled, as in the bridge).
             self._pending.delete(key)
+            deps = self._deps(end_user_id, image_bytes)
             approve = is_clear_yes(message)
             outcome = await llm_client.resume(
                 agent,
@@ -131,6 +153,8 @@ class ChatService:
                 deps=deps,
             )
         else:
+            image_bytes = _decode_image(image)
+            deps = self._deps(end_user_id, image_bytes)
             stored = self._repo.recent(key, self._window)
             history = domain.select_window(
                 [(m.role, m.content) for m in stored], self._window
@@ -140,7 +164,13 @@ class ChatService:
         if isinstance(outcome, llm_client.PendingRun):
             if self._pending is None:  # tool-bound agent without a store is a wiring bug
                 raise RuntimeError("write tool paused a run but no pending store is configured")
-            self._pending.put(key, outcome.messages, outcome.approval_ids, outcome.summary)
+            self._pending.put(
+                key,
+                outcome.messages,
+                outcome.approval_ids,
+                outcome.summary,
+                image=image_bytes,
+            )
             reply = confirmation_reply(outcome.summary)
         else:
             reply = outcome

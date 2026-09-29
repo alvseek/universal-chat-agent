@@ -24,6 +24,8 @@ SERVICE = "demo"
 calls: list[tuple[str, str]] = []
 # Where a store landed — a stand-in for a side effect at the far end.
 stored: list[str] = []
+# The photo each tool call saw on its run (None when the turn carried none).
+images: list[bytes | None] = []
 # Tokens whose calls should be refused, as a service refuses a revoked one.
 refuse: set[str] = set()
 
@@ -40,6 +42,7 @@ class DemoError(Exception):
 def reset(refuse_tokens: set[str] | None = None) -> None:
     calls.clear()
     stored.clear()
+    images.clear()
     refuse.clear()
     refuse.update(refuse_tokens or ())
 
@@ -77,6 +80,7 @@ def build_demo_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
                 ctx.deps.on_auth_failed(SERVICE)
             return {"error": "auth_failed", "status": exc.status}
         calls.append((token, "look_up"))
+        images.append(ctx.deps.image)
         return {"answer": f"{query} = 1"}
 
     async def store(ctx: RunContext[ChatDeps], name: str) -> dict[str, Any]:
@@ -87,6 +91,7 @@ def build_demo_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
         token = _credential(token)
         calls.append((token, "store"))
         stored.append(name)
+        images.append(ctx.deps.image)
         return {"stored": name}
 
     async def discard(ctx: RunContext[ChatDeps], name: str) -> dict[str, Any]:
@@ -96,6 +101,7 @@ def build_demo_toolsets(deps: Mapping[str, Any]) -> list[AbstractToolset]:
             return _not_linked()
         token = _credential(token)
         calls.append((token, "discard"))
+        images.append(ctx.deps.image)
         return {"discarded": name}
 
     reads = FunctionToolset(tools=[look_up], id="demo-reads")

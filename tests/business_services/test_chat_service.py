@@ -5,6 +5,7 @@ conversation_id (unchanged behaviour). With one: the registry's agent answers an
 history is keyed per agent. Naming an agent on a brain without a registry is refused.
 """
 import asyncio
+import base64
 
 import pytest
 
@@ -84,4 +85,47 @@ def test_named_agent_without_registry_is_refused(monkeypatch):
 
     with pytest.raises(RegistryUnavailable):
         asyncio.run(svc.handle("telegram:1", "hi", agent_id="op"))
+    assert repo.rows == []
+
+
+def _stub_generate_capturing_deps(monkeypatch, seen):
+    async def generate(agent, history, user_msg, deps=None):
+        seen.append(deps)
+        return "ok"
+
+    monkeypatch.setattr(cs.llm_client, "generate", generate)
+
+
+def test_image_is_decoded_onto_deps(monkeypatch):
+    seen, repo = [], _Repo()
+    _stub_generate_capturing_deps(monkeypatch, seen)
+    svc = ChatService("DEFAULT", repo, memory_window=5)
+
+    raw = b"\x89PNG\r\n\x1a\n\x00\x01"
+    asyncio.run(
+        svc.handle("telegram:1", "set the photo", image=base64.b64encode(raw).decode())
+    )
+
+    assert seen[0].image == raw
+
+
+def test_turn_without_image_puts_none_on_deps(monkeypatch):
+    seen, repo = [], _Repo()
+    _stub_generate_capturing_deps(monkeypatch, seen)
+    svc = ChatService("DEFAULT", repo, memory_window=5)
+
+    asyncio.run(svc.handle("telegram:1", "hi"))
+
+    assert seen[0].image is None
+
+
+def test_malformed_image_is_refused_before_any_work(monkeypatch):
+    seen, repo = [], _Repo()
+    _stub_generate(monkeypatch, seen)
+    svc = ChatService("DEFAULT", repo, memory_window=5)
+
+    with pytest.raises(ValueError):
+        asyncio.run(svc.handle("telegram:1", "hi", image="not base64!!"))
+
+    assert seen == []
     assert repo.rows == []

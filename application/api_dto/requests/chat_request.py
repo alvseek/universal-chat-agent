@@ -16,3 +16,7 @@ class ChatRequest(BaseModel):
     # what a tool call runs as. Optional: a bridge that sends none simply cannot
     # offer linking, and the default agent (which has no tools) never needs it.
     end_user_id: str | None = Field(default=None, min_length=1)
+    # A photo the bridge downloaded, base64-encoded. The model never sees it — it
+    # rides the run on ChatDeps so an image tool can use the bytes. Optional and
+    # additive: a bridge that sends none looks exactly as it always did.
+    image: str | None = Field(default=None, min_length=1)

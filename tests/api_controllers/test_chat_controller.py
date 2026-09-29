@@ -14,11 +14,18 @@ class _StubService:
 
     def __init__(self):
         self.calls = []
+        self.images = []
 
     async def handle(
-        self, conversation_id: str, message: str, agent_id=None, end_user_id=None
+        self,
+        conversation_id: str,
+        message: str,
+        agent_id=None,
+        end_user_id=None,
+        image=None,
     ) -> str:
         self.calls.append((conversation_id, message))
+        self.images.append(image)
         return f"echo:{message}"
 
 
@@ -45,6 +52,17 @@ def test_chat_returns_service_reply():
     assert resp.status_code == 200
     assert resp.json() == {"reply": "echo:hi"}
     assert service.calls == [("telegram:1", "hi")]
+
+
+def test_chat_forwards_image():
+    service = _StubService()
+    client = _make_client(service)
+    resp = client.post(
+        "/chat",
+        json={"conversation_id": "telegram:1", "message": "set it", "image": "aGk="},
+    )
+    assert resp.status_code == 200
+    assert service.images == ["aGk="]
 
 
 def test_chat_rejects_missing_fields():

@@ -19,9 +19,22 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     messages    BLOB NOT NULL,
     approval_ids TEXT NOT NULL,
     summary     TEXT NOT NULL,
+    image       BLOB,
     created     REAL NOT NULL
 );
 """
+
+
+def _ensure_image_column(conn: sqlite3.Connection) -> None:
+    """Add ``image`` to a table created before that column existed.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op on an existing database, so a brain
+    upgraded in place would never gain the column without this. Additive and
+    nullable, so pre-change rows read ``NULL`` and resume exactly as before.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(pending_approvals)")}
+    if "image" not in columns:
+        conn.execute("ALTER TABLE pending_approvals ADD COLUMN image BLOB")
 
 
 @dataclass(frozen=True)
@@ -30,30 +43,42 @@ class PendingApproval:
     messages: bytes
     approval_ids: list[str]
     summary: str
+    # The photo that arrived with the request this write belongs to, so the
+    # resumed run — whose own turn carries none — can hand it to the tool.
+    image: bytes | None = None
 
 
 class PendingApprovalRepository:
     def __init__(self, db_path: str) -> None:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.executescript(SCHEMA)
+        _ensure_image_column(self._conn)
         self._conn.commit()
 
-    def put(self, key: str, messages: bytes, approval_ids: list[str], summary: str) -> None:
+    def put(
+        self,
+        key: str,
+        messages: bytes,
+        approval_ids: list[str],
+        summary: str,
+        image: bytes | None = None,
+    ) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO pending_approvals (key, messages, approval_ids, summary, created) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (key, messages, json.dumps(approval_ids), summary, time.time()),
+            "INSERT OR REPLACE INTO pending_approvals "
+            "(key, messages, approval_ids, summary, image, created) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (key, messages, json.dumps(approval_ids), summary, image, time.time()),
         )
         self._conn.commit()
 
     def get(self, key: str) -> PendingApproval | None:
         row = self._conn.execute(
-            "SELECT messages, approval_ids, summary FROM pending_approvals WHERE key = ?",
+            "SELECT messages, approval_ids, summary, image FROM pending_approvals WHERE key = ?",
             (key,),
         ).fetchone()
         if row is None:
             return None
-        return PendingApproval(key, row[0], json.loads(row[1]), row[2])
+        return PendingApproval(key, row[0], json.loads(row[1]), row[2], row[3])
 
     def delete(self, key: str) -> None:
         self._conn.execute("DELETE FROM pending_approvals WHERE key = ?", (key,))

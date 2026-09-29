@@ -24,7 +24,11 @@ async def health() -> dict:
 async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     service = request.app.state.chat_service
     reply = await service.handle(
-        req.conversation_id, req.message, req.agent_id, req.end_user_id
+        req.conversation_id,
+        req.message,
+        req.agent_id,
+        req.end_user_id,
+        image=req.image,
     )
     return ChatResponse(reply=reply)
 

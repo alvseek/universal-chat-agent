@@ -17,6 +17,14 @@ called. Consequences that follow from that rule, and are the point of it:
   ``exclude``), so a deployment can narrow a prompt without a code change — and
   the default is everything, in the canonical order below.
 
+A second rule follows from the first: a record that describes itself as a
+**partial page** keeps that description in the prompt. The memory server bounds a
+rolling episode to a few timestamp groups and says so in the JSON; a renderer that
+dropped those fields would turn a page into something that looks like a whole
+record, which is the one failure the bound exists to prevent. See
+``_pagination_notice`` — it fires on record shape, never on layer name, and it
+never fetches anything.
+
 No I/O, no framework types: a dict in, a string out.
 """
 from __future__ import annotations
@@ -99,6 +107,37 @@ def _heading(name: str) -> str:
     return f"## {name}"
 
 
+def _pagination_notice(record: Mapping[str, Any]) -> str | None:
+    """The notice a *partial* record owes its reader, or ``None`` for a whole one.
+
+    A bounded page is only honest if the reader can see that it is bounded and knows
+    how to finish it, and the JSON carries that in three fields: how many timestamp
+    groups arrived, how many the record holds, and — the only one that answers "is
+    there more?" — the cursor. The counts alone cannot: a final page returns fewer
+    than the total and is still complete.
+
+    So the trigger is ``next_cursor``, never ``returned < total``. Applied by record
+    **shape** (valid page metadata on the record), never by layer name, because which
+    layer a paged record sits in is the memory server's business and can change.
+
+    Returns "" for a whole record — the caller then renders exactly what it always did.
+    """
+    cursor = record.get("next_cursor")
+    returned = record.get("blocks_returned")
+    total = record.get("blocks_total")
+    if not isinstance(cursor, str) or not cursor.strip():
+        return None
+    if not isinstance(returned, int) or not isinstance(total, int):
+        return None
+    uuid = record.get("uuid")
+    address = f" `{uuid}`" if isinstance(uuid, str) and uuid.strip() else ""
+    return (
+        f"> **Partial record** — {returned} of {total} timestamp groups returned;"
+        f" record{address}; next cursor `{cursor}`."
+        " More remains: read it with `get` using that uuid and cursor."
+    )
+
+
 def _render_record(record: Mapping[str, Any], *, level: int = 3) -> str:
     title = record.get("title")
     body = record.get("content")
@@ -107,7 +146,13 @@ def _render_record(record: Mapping[str, Any], *, level: int = 3) -> str:
         lines.append(f"{'#' * level} {title}")
     if body:
         lines.append(str(body).strip())
-    return "\n".join(lines)
+    rendered = "\n".join(lines)
+    notice = _pagination_notice(record)
+    if notice:
+        # A blank line, so the notice reads as a statement about the record rather than
+        # as the last line of its body. Ordinary records never take this branch.
+        rendered = f"{rendered}\n\n{notice}" if rendered else notice
+    return rendered
 
 
 def _render_index_entry(entry: Mapping[str, Any]) -> str:

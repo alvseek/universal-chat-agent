@@ -113,3 +113,114 @@ def test_render_layer_by_shape():
     mixed = ad.render_layer("x", [{"title": "R", "content": "body"}, {"title": "I"}])
     assert mixed == "## x\n### R\nbody\n\n- I"
     assert ad.render_layer("x", 42) == "## x\n42"
+
+
+# --- partial pages ------------------------------------------------------------------
+#
+# A bounded page must not become a whole-looking prompt. The notice is driven by
+# ``next_cursor`` — not by ``returned < total``, which a complete final page
+# also satisfies.
+
+PARTIAL = {
+    "uuid": "abcdef0123456789abcdef0123456789",
+    "title": "Rolling episode",
+    "content": "### 2026-11-10 10.05 - newest\n\nbody\n",
+    "blocks_returned": 3,
+    "blocks_total": 5,
+    "next_cursor": "2026-11-10 10.02",
+}
+
+
+def test_a_partial_page_in_a_single_record_layer_keeps_its_notice():
+    payload = {**PAYLOAD, "latest_episode": PARTIAL}
+
+    prompt = ad.assemble_system_prompt(payload)
+
+    assert "## latest_episode" in prompt
+    assert "### Rolling episode" in prompt
+    assert "Partial record" in prompt
+    assert "3 of 5 timestamp groups" in prompt
+    assert PARTIAL["uuid"] in prompt
+    assert PARTIAL["next_cursor"] in prompt
+    # The notice follows the body it qualifies, so it reads as a statement about
+    # the record.
+    assert prompt.index("body\n") < prompt.index("Partial record")
+
+
+def test_a_partial_page_in_a_list_layer_keeps_its_notice_under_a_nonstandard_name():
+    """Applied by record shape, never by layer name: the server may add or rename
+    layers."""
+    payload = {
+        **PAYLOAD,
+        "episodes_carried_forward": [
+            PARTIAL,
+            {**PARTIAL, "uuid": "u2", "next_cursor": None},
+        ],
+    }
+
+    prompt = ad.assemble_system_prompt(payload)
+
+    assert "## episodes_carried_forward" in prompt
+    assert prompt.count("Partial record") == 1
+
+
+def test_an_ordinary_record_renders_byte_for_byte_as_before():
+    legacy = {
+        "uuid": "e1",
+        "title": "Old episode",
+        "content": "### 2026-01-01 10.00 - old\n\nbody",
+    }
+    prompt = ad.assemble_system_prompt({**PAYLOAD, "latest_episode": legacy})
+
+    assert "Partial record" not in prompt
+    assert prompt.endswith(
+        "## latest_episode\n### Old episode\n### 2026-01-01 10.00 - old\n\nbody"
+    )
+
+
+def test_a_complete_final_page_carries_no_notice():
+    """The case the count inequality cannot distinguish: fewer than total, none left."""
+    terminal = {**PARTIAL, "blocks_returned": 2, "next_cursor": None}
+    prompt = ad.assemble_system_prompt({**PAYLOAD, "latest_episode": terminal})
+    assert "Partial record" not in prompt
+
+
+def test_a_notice_without_a_usable_uuid_still_warns_that_the_record_is_partial():
+    partial = {k: v for k, v in PARTIAL.items() if k != "uuid"}
+    prompt = ad.assemble_system_prompt({**PAYLOAD, "latest_episode": partial})
+    assert "Partial record" in prompt and "3 of 5" in prompt
+
+
+def test_unusable_page_metadata_is_ignored_rather_than_half_reported():
+    """A cursor with no counts is not a page this renderer can describe; silence is
+    better than inventing "None of None"."""
+    prompt = ad.assemble_system_prompt(
+        {
+            **PAYLOAD,
+            "latest_episode": {"title": "T", "content": "B", "next_cursor": "x"},
+        }
+    )
+    assert "Partial record" not in prompt
+
+
+def test_a_page_in_a_deep_layer_survives_the_whole_assembly():
+    """The end-to-end shape: Munnin's payload (nested groups, an index, a page) in,
+    one prompt out, with the continuation facts still readable."""
+    payload = {
+        **PAYLOAD,
+        "latest_episode": PARTIAL,
+        "episodic_index": [
+            {"uuid": PARTIAL["uuid"], "title": "Rolling episode", "project": "munnin",
+             "created_date": "2026-11-10"},
+        ],
+    }
+
+    prompt = ad.assemble_system_prompt(payload)
+
+    for expected in ("## shared.user_profile", "## identity", "## episodic_index",
+                     "## latest_episode"):
+        assert expected in prompt
+    assert "Partial record" in prompt
+    assert PARTIAL["uuid"] in prompt
+    assert PARTIAL["next_cursor"] in prompt
+

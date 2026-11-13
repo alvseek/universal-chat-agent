@@ -10,6 +10,7 @@ service's side never has to be mirrored here.
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import httpx
 
@@ -31,6 +32,30 @@ class MemoryServiceClient:
         self._base = base_url.rstrip("/")
         self._token = token_provider
         self._client = client
+
+    async def get_knowledge_record(self, uuid: str) -> dict[str, Any]:
+        """Read one full UUID; callers enforce the agent's knowledge boundary."""
+        address = UUID(uuid).hex
+        try:
+            bearer = await self._token()
+            resp = await self._client.get(
+                self._base + "/api/record/" + address,
+                headers={"Authorization": f"Bearer {bearer}"},
+            )
+        except (httpx.HTTPError, RuntimeError) as exc:
+            # Do not reflect upstream exception text: it can contain credentials.
+            raise MemoryServiceError("memory record request failed") from exc
+        if resp.status_code in (401, 403):
+            raise MemoryServiceAuthError("memory record access refused")
+        if resp.status_code != 200:
+            raise MemoryServiceError(f"memory record request answered HTTP {resp.status_code}")
+        try:
+            record = resp.json()
+        except ValueError as exc:
+            raise MemoryServiceError("memory record response is not JSON") from exc
+        if not isinstance(record, dict):
+            raise MemoryServiceError("memory record response is not an object")
+        return record
 
     async def awaken(self, agent_id: str) -> dict[str, Any]:
         """The agent's full awakening payload, exactly as the service assembled it."""

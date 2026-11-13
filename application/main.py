@@ -34,6 +34,7 @@ from application.business_domain.awakening_domain import AgentNotFound
 from application.business_domain.link_provider import LinkProvider
 from application.business_services.agent_registry import AgentRegistry
 from application.business_services.chat_service import ChatService
+from application.business_services.knowledge_tools import build_knowledge_tools
 from application.business_services.link_service import LinkService
 from application.business_services.toolsets import (
     build_toolsets,
@@ -126,13 +127,21 @@ def build_registry(
         http,
     )
     memory_client = MemoryServiceClient(memory.url, token_provider, http)
+    prepared_toolsets: dict[str, list] = {}
 
     async def load_prompt(agent_id: str) -> str:
         payload = await memory_client.awaken(agent_id)
         prompt = awakening_domain.assemble_system_prompt(
             payload, layers=memory.layers, exclude=memory.exclude
         )
-        return prompt + _tools_block(bindings.get(agent_id, []))
+        tools = [
+            *bindings.get(agent_id, []),
+            build_knowledge_tools(
+                memory_client, agent_id, payload, layers=memory.layers, exclude=memory.exclude
+            ),
+        ]
+        prepared_toolsets[agent_id] = tools
+        return prompt + _tools_block(tools)
 
     def make_agent(agent_id: str, prompt: str):
         return build_agent(
@@ -140,7 +149,7 @@ def build_registry(
             config.llm_base_url,
             config.llm_api_key,
             prompt,
-            toolsets=bindings.get(agent_id) or None,
+            toolsets=prepared_toolsets.pop(agent_id),
             # Each agent pins its own sticky-routing key, so one agent's traffic
             # cannot drag another's cache onto a different upstream provider.
             session_id=agent_id,

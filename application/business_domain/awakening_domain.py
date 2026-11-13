@@ -38,6 +38,7 @@ from typing import Any, Iterable, Mapping, Sequence
 CANONICAL_ORDER: tuple[str, ...] = (
     "shared.user_profile",
     "shared.reasoning",
+    "shared.knowledge_index",
     "shared.knowledge",
     "identity",
     "reasoning",
@@ -164,7 +165,12 @@ def _render_index_entry(entry: Mapping[str, Any]) -> str:
     tags = entry.get("tags")
     if tags:
         extras.append(", ".join(str(t) for t in tags))
-    return f"- {title}" + (f" ({'; '.join(extras)})" if extras else "")
+    line = f"- {title}" + (f" ({'; '.join(extras)})" if extras else "")
+    if entry.get("uuid"):
+        line += f" [uuid: {entry['uuid']}]"
+    if entry.get("content_summary"):
+        line += f" — {entry['content_summary']}"
+    return line
 
 
 def render_layer(name: str, value: Any) -> str:
@@ -224,13 +230,32 @@ def assemble_system_prompt(
     """
     if is_absent(payload):
         raise AgentNotFound(payload.get("agent_id"))
-    flat = flatten_layers(payload)
-    skip = set(exclude)
+    flat = selected_layers(payload, layers=layers, exclude=exclude)
     parts: list[str] = []
-    for name in layer_order(flat.keys(), layers):
-        if name in skip:
-            continue
+    for name in flat:
         text = render_layer(name, flat[name])
         if text:
             parts.append(text)
     return "\n\n".join(parts)
+
+
+def selected_layers(
+    payload: Mapping[str, Any], *, layers: Sequence[str] | None = None,
+    exclude: Iterable[str] = (),
+) -> dict[str, Any]:
+    """The exact rendered selection, also used to constrain knowledge reads.
+
+    Old configuration names follow the new field only when that field exists.
+    If both fields arrive during a rollout, the index wins; bodies are not duplicated.
+    """
+    flat = flatten_layers(payload)
+    has_index = "shared.knowledge_index" in flat
+    if has_index:
+        flat.pop("shared.knowledge", None)
+
+    def current(name: str) -> str:
+        return "shared.knowledge_index" if has_index and name == "shared.knowledge" else name
+
+    configured = tuple(dict.fromkeys(current(n) for n in layers)) if layers else None
+    skip = {current(n) for n in exclude}
+    return {n: flat[n] for n in layer_order(flat, configured) if n not in skip}

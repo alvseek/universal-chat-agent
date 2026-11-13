@@ -194,15 +194,22 @@ service, not as code here. A request naming `agent_id` goes through:
    system prompt **by shape, never by name**: every layer the service sends is rendered
    (whole records as sections, index entries as one-liners), in a canonical order with
    unknown layers appended, so a new layer needs no code here. Narrowing is configuration
-   (`AWAKENING_LAYERS` / `AWAKENING_EXCLUDE`), never a hidden default.
+   (`AWAKENING_LAYERS` / `AWAKENING_EXCLUDE`), never a hidden default. Knowledge indexes
+   retain their UUIDs and summaries. The new `shared.knowledge_index` replaces whole shared
+   knowledge; old `shared.knowledge` selection/exclusion names follow the new field during rollout.
 4. **Build** — a pydantic-ai `Agent` with that prompt and the agent's bound toolsets
    (below), then the normal chat flow, with history keyed `agent_id:conversation_id` so
-   two agents sharing one brain never share a conversation.
+   two agents sharing one brain never share a conversation. Memory-awakened agents also receive
+   `read_knowledge(uuid)`: a read-only tool for records advertised in their selected knowledge
+   indexes. It uses the same authenticated memory-service connection and rechecks type,
+   ownership and archival before returning a body. It does not browse arbitrary tenant records
+   or eagerly fetch the directory. A default agent without awakening gets no memory tool.
 
 ### Toolsets: what an agent may *do*
 
 Tools are code; which agent holds them is configuration, and *where* that code lives is
-configuration too. The brain ships no integration of its own: `AGENT_TOOLSETS` binds an
+configuration too. Apart from its memory-service knowledge reader, the brain ships no
+domain integration of its own: `AGENT_TOOLSETS` binds an
 agent to a toolset *name*, and `TOOLSET_SOURCES` says where that name's builder lives
 (`alias=module:attribute`), imported at startup — so a toolset the brain has never heard
 of binds without touching this repo. `LINK_PROVIDERS` does the same for the provider that

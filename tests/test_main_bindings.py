@@ -37,3 +37,48 @@ def test_a_source_that_cannot_be_imported_names_itself():
         build_bindings(
             _config((("a", "ghost"),), toolset_sources=(("ghost", "no_such_pkg:x"),))
         )
+
+
+def test_registry_binds_knowledge_and_external_tools_to_the_actual_agent(monkeypatch):
+    import asyncio
+
+    from application import main
+    from application.configuration.env import MemoryServiceConfig
+    from tests.business_services.test_knowledge_tools import PAYLOAD
+
+    captured = []
+
+    async def awaken(self, agent_id):
+        return PAYLOAD
+
+    def build(*args, **kwargs):
+        captured.append((args, kwargs))
+        return object()
+
+    monkeypatch.setattr(main.MemoryServiceClient, "awaken", awaken)
+    monkeypatch.setattr(main, "build_agent", build)
+    external = build_bindings(
+        _config((("op", "demo"),), toolset_sources=(DEMO,))
+    )
+    memory = MemoryServiceConfig(
+        url="https://memory.example", resource="r", client_id="id", client_secret="secret",
+        scope="", issuer="https://issuer.example", cache_ttl_seconds=60, layers=None, exclude=(),
+    )
+
+    async def run():
+        registry, http = main.build_registry(_config(()), memory, external)
+        try:
+            await registry.get("op")
+            await registry.reload("op")
+        finally:
+            await http.aclose()
+
+    asyncio.run(run())
+    assert len(captured) == 2
+    for args, kwargs in captured:
+        prompt = args[3]
+        assert "read_knowledge" in prompt and "look_up" in prompt
+        tools = kwargs["toolsets"]
+        assert len(tools) == 3
+        assert "read_knowledge" in tools[-1].tools
+    assert len(external["op"]) == 2  # no mutation or repeated binding on reload
